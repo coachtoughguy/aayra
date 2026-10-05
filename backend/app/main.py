@@ -9,7 +9,7 @@ from app.config import get_settings
 from app.context import install_context
 from app.db import get_db
 from app.errors import install_error_handlers
-from app.routers import admin_bootstrap, content, health, lessons, students
+from app.routers import admin_bootstrap, assessments, content, health, learning, lessons, students, teacher_review
 
 
 @asynccontextmanager
@@ -33,6 +33,9 @@ def create_app() -> FastAPI:
     app.include_router(content.router)
     app.include_router(lessons.router)
     app.include_router(students.router)
+    app.include_router(learning.router)
+    app.include_router(assessments.router)
+    app.include_router(teacher_review.router)
     return app
 
 

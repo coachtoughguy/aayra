@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 from app.auth import Actor, current_actor, resolve_student_context
 from app.db import fetch_all, fetch_one, get_db
+from app.routers.assessments import review_items
 
 router = APIRouter(prefix="/v1/students/me", tags=["student"])
 
@@ -44,6 +45,7 @@ async def _visible_work(conn: AsyncConnection, student_id) -> list[dict[str, Any
 
 def _item(row: dict[str, Any], tier: str | None = None) -> dict[str, Any]:
     out = {
+        "kind": "LEARNING",
         "student_assignment_id": row["student_assignment_id"],
         "assignment_id": row["assignment_id"],
         "lesson_id": row["lesson_id"],
@@ -57,6 +59,20 @@ def _item(row: dict[str, Any], tier: str | None = None) -> dict[str, Any]:
     if tier:
         out["tier"] = tier
     return out
+
+
+def _review_item(r: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "kind": "REVIEW",
+        "review_schedule_item_id": r["review_schedule_item_id"],
+        "lesson_id": r["lesson_id"],
+        "title": f"Review: {r['concept_name']}",
+        "subject": {"subject_id": r["subject_id"], "name": r["subject_name"]},
+        "review_day": r["review_day"],
+        "scheduled_for": r["scheduled_for"],
+        "state": r["state"],
+        "tier": "REVIEW_DUE_TODAY",
+    }
 
 
 def _tier(due_at: datetime | None, now: datetime, tz: ZoneInfo) -> str:
@@ -81,7 +97,8 @@ async def home(request: Request, actor: Actor = Depends(current_actor)) -> dict:
         request.state.school_id = str(ctx.school_id)
         school = await fetch_one(conn, "SELECT timezone FROM schools WHERE school_id = :s", s=ctx.school_id)
         work = await _visible_work(conn, ctx.student_id)
-    tz = ZoneInfo(school["timezone"])
+        tz = ZoneInfo(school["timezone"])
+        reviews = [r for r in await review_items(conn, ctx.student_id, tz) if r["state"] != "UPCOMING"]
     pending = [w for w in work if w["status"] not in DONE]
 
     started = [w for w in pending if w["status"] == "IN_PROGRESS"]
@@ -96,6 +113,10 @@ async def home(request: Request, actor: Actor = Depends(current_actor)) -> dict:
         for w in pending
         if not continue_learning or w["student_assignment_id"] != continue_learning["student_assignment_id"]
     ]
+    # Due/overdue spaced reviews sit in the REVIEW_DUE_TODAY tier (doc 21 v0.7 What's Next order).
+    for r in reviews:
+        due = datetime.combine(r["scheduled_for"], datetime.min.time(), tzinfo=tz)
+        queue.append((TIER_ORDER.index("REVIEW_DUE_TODAY"), due, r["concept_name"], r, "REVIEW_DUE_TODAY"))
     queue.sort(key=lambda q: q[:3])
     week_start = (now.astimezone(tz) - timedelta(days=now.astimezone(tz).weekday())).replace(
         hour=0, minute=0, second=0, microsecond=0
@@ -104,9 +125,9 @@ async def home(request: Request, actor: Actor = Depends(current_actor)) -> dict:
     return {
         "data": {
             "continue_learning": continue_learning,
-            "whats_next": [_item(w, t) for *_, w, t in queue],
+            "whats_next": [_review_item(w) if "review_schedule_item_id" in w else _item(w, t) for *_, w, t in queue],
             "my_learning": {"pending_count": len(pending)},
-            "my_reviews": {"due_today_count": 0},  # spaced review arrives with Slice 2 (§7.6)
+            "my_reviews": {"due_today_count": len(reviews)},
             "progress_snapshot": {
                 "assigned_total": len(work),
                 "completed_total": len(done),

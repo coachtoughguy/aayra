@@ -25,7 +25,13 @@ AI-powered Learning OS. Product and technical design live in the claude.ai **aay
   - [x] Migration 021 (questions ↔ generation link + answer_spec) applied to Supabase
   - [x] v1.3: publish a published lesson to more sections; retry / remove a failed file
   - [ ] Real AI model behind `ContentAI`, real Supabase Storage behind `StorageGateway`
-- [ ] **Slice 2** — learning → mastery → spaced review (§7)
+- [x] **Slice 2** — learning → mastery → spaced review (§7), see `docs/22c_*`
+  - [x] focus cycles, finish, prerequisites; mastery check with hint → retry → explanation → verification
+  - [x] async free-text grading (TX1/TX2), MasteryEngine, teacher review queue (confirm/adjust)
+  - [x] fixed-cadence spaced review on the shared pipeline; reviews on Student Home
+  - [x] parent/self learning: scoped mastery, opt-in spaced review (Oct 5 decision)
+  - [ ] Apply pending migration 022 to Supabase
+  - [ ] Teacher feedback draft/publish; deliverable submissions
 
 ## Demo data
 

@@ -9,7 +9,7 @@ import logging
 from typing import Any
 
 from app.db import Database, execute, fetch_one, get_db
-from app.services import distribution, pipeline
+from app.services import distribution, grading, pipeline
 
 log = logging.getLogger("aayra.worker")
 
@@ -17,6 +17,7 @@ BACKGROUND_HANDLERS = {
     "LESSON_PREPARATION": pipeline.run_lesson_preparation,
     "ASSIGNMENT_FANOUT": distribution.run_fanout,
     "ASSIGNMENT_RELEASE": distribution.run_release,
+    "RESPONSE_GRADING": grading.run_grading_job,
 }
 
 
