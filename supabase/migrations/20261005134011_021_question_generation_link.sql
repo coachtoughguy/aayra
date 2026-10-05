@@ -1,6 +1,5 @@
 -- 021_question_generation_link
--- PENDING: not yet applied to the hosted project. Apply via Supabase, then rename this file to the
--- version Supabase assigns.
+-- Applied to Supabase project aayra on 2026-10-05 (version 20261005134011), approved by Vinay.
 --
 -- Gap found while implementing contract §6.2/§6.4: `questions` had no link to the generation
 -- (assessment_blueprints.version) that produced it, and no place for the answer key/options.

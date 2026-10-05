@@ -67,15 +67,22 @@ def _usage(*texts: str) -> Usage:
 
 
 class StubContentAI:
-    """Deterministic stand-in. A content title containing "[fail]" simulates an unreadable file."""
+    """Deterministic stand-in. A content title containing "[fail]" simulates an unreadable file;
+    "[fail-once]" fails the first attempt only (a transient provider error, fixed by retrying)."""
 
     model_name = "stub-content-ai"
     prompt_version = "stub-v1"
+
+    def __init__(self) -> None:
+        self._failed_once: set[Any] = set()
 
     async def extract(self, item: dict[str, Any]) -> tuple[list[Chunk], Usage]:
         title = item.get("title") or item["content_type"].lower()
         if "[fail]" in title:
             raise ContentExtractionError("UNREADABLE_SOURCE", f"Could not read '{title}'.")
+        if "[fail-once]" in title and item["content_item_id"] not in self._failed_once:
+            self._failed_once.add(item["content_item_id"])
+            raise ContentExtractionError("PROVIDER_UNAVAILABLE", f"Temporary failure reading '{title}'.")
         kind = {"VIDEO": "TRANSCRIPT", "AUDIO": "TRANSCRIPT", "YOUTUBE": "TRANSCRIPT", "IMAGE": "OCR", "PHOTO": "OCR"}
         chunk_type = kind.get(item["content_type"], "DOCUMENT_TEXT")
         chunks = [

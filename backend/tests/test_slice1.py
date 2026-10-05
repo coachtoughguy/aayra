@@ -489,3 +489,114 @@ async def test_home_priority_tiers_and_continue_learning(client, db, storage, sc
         ("Later", "LATER"),
     ]
     assert home["my_learning"]["pending_count"] == 5
+
+
+# ================================================================================================
+# v1.3 additions (doc 21, Oct 5): publish to more sections; retry / remove a failed file
+# ================================================================================================
+async def _second_section(client, db, school) -> dict:
+    """10B with Sarah as Primary Biology teacher and 3 students."""
+    admin = school["admin_user_id"]
+    sec = ok(await call(client, "POST", f"/v1/grades/{school['grade_id']}/sections", admin, {"name": "10B"}), 201)
+    ok(await call(client, "POST", "/v1/teacher-assignments", admin, {
+        "teacher_id": school["teachers"]["sarah"]["teacher_id"], "section_id": sec["section_id"],
+        "subject_id": school["subjects"]["BIO"], "assignment_role": "PRIMARY_SUBJECT_TEACHER"}), 201)  # fmt: skip
+    for i in range(3):
+        ok(await call(client, "POST", "/v1/students", admin, {
+            "section_id": sec["section_id"], "display_name": f"B Student {i}", "admission_id": f"10B-{i:03d}",
+            "date_of_birth": "2011-01-01", "enrollment_date": "2026-06-01"}), 201)  # fmt: skip
+    return sec
+
+
+async def test_published_lesson_can_be_published_to_another_section(client, db, storage, school):
+    sec_b = await _second_section(client, db, school)
+    view = await ready_lesson(client, db, storage, school)
+    first = await publish(client, view, school)
+    after = ok(await call(client, "GET", f"/v1/lessons/{view['lesson_id']}", sarah(school)))
+    assert after["status"] == "PUBLISHED"
+    # same approved generation, fresh lesson version, new section
+    second = await publish(client, after, school, target={"type": "SECTION", "section_id": sec_b["section_id"]})
+    assert second["assignment_id"] != first["assignment_id"] and second["lesson_status"] == "PUBLISHED"
+    # publishing to 10A again is refused (it already has this lesson)
+    latest = ok(await call(client, "GET", f"/v1/lessons/{view['lesson_id']}", sarah(school)))
+    r = await call(
+        client, "POST", f"/v1/lessons/{view['lesson_id']}/publish", sarah(school), publish_body(latest, school)
+    )
+    assert err(r, 409, "ALREADY_PUBLISHED_TO_TARGET")["details"]["assignment_id"] == first["assignment_id"]
+    await worker.drain(db)
+    a = ok(await call(client, "GET", f"/v1/assignments/{second['assignment_id']}", sarah(school)))
+    assert (a["distribution_status"], a["delivered_count"]) == ("COMPLETE", 3)
+    progress = ok(await call(client, "GET", f"/v1/lessons/{view['lesson_id']}/progress", sarah(school)))
+    assert [p["counts"]["not_started"] for p in progress["assignments"]] == [28, 3]
+    async with db.connect() as conn:
+        lesson = await fetch_one(
+            conn, "SELECT approved_at, published_at FROM lessons WHERE lesson_id = :l", l=uid(view["lesson_id"])
+        )
+    assert lesson["approved_at"] == lesson["published_at"]  # the original approval is kept
+
+
+async def test_failed_file_can_be_retried(client, db, storage, school):
+    user = sarah(school)
+    flaky = await upload_pdf(client, storage, user, "[fail-once] slides")
+    lesson = ok(await call(client, "POST", "/v1/lessons", user, {"subject_id": school["subjects"]["BIO"],
+                "academic_year_id": school["academic_year_id"], "title": "Respiration"}), 201)  # fmt: skip
+    ok(await call(client, "POST", f"/v1/lessons/{lesson['lesson_id']}/content", user,
+                  {"content_item_id": flaky["content_item_id"], "display_order": 1}), 201)  # fmt: skip
+    await worker.drain(db)
+    view = ok(await call(client, "GET", f"/v1/lessons/{lesson['lesson_id']}", user))
+    assert view["status"] == "PROCESSING_FAILED" and view["content"][0]["processing_status"] == "FAILED"
+
+    retry_path = f"/v1/content-items/{flaky['content_item_id']}/retry-processing"
+    r = ok(await call(client, "POST", retry_path, user))
+    assert r["processing_status"] == "QUEUED" and r["lessons_reprocessing"] == [lesson["lesson_id"]]
+    err(await call(client, "POST", retry_path, user), 409, "RETRY_NOT_ALLOWED")  # already queued
+    await worker.drain(db)
+    view = ok(await call(client, "GET", f"/v1/lessons/{lesson['lesson_id']}", user))
+    assert view["status"] == "READY" and view["generation"]["generation_version"] == 1
+    err(await call(client, "POST", retry_path, user), 409, "RETRY_NOT_ALLOWED")  # nothing to retry
+    # only teachers of the same school may retry
+    err(await call(client, "POST", retry_path, arjun(school)), 403, "INSUFFICIENT_ROLE_SCOPE")
+
+
+async def test_permanently_bad_file_can_be_removed(client, db, storage, school):
+    user = sarah(school)
+    good = await upload_pdf(client, storage, user, "Good notes")
+    bad = await upload_pdf(client, storage, user, "[fail] corrupt scan")
+    lesson = ok(await call(client, "POST", "/v1/lessons", user, {"subject_id": school["subjects"]["BIO"],
+                "academic_year_id": school["academic_year_id"], "title": "Genetics"}), 201)  # fmt: skip
+    path = f"/v1/lessons/{lesson['lesson_id']}/content"
+    ok(await call(client, "POST", path, user, {"content_item_id": good["content_item_id"], "display_order": 1}), 201)
+    ok(await call(client, "POST", path, user, {"content_item_id": bad["content_item_id"], "display_order": 2}), 201)
+    await worker.drain(db)
+    assert ok(await call(client, "GET", f"/v1/lessons/{lesson['lesson_id']}", user))["status"] == "PROCESSING_FAILED"
+    # retrying a truly unreadable file fails again
+    ok(await call(client, "POST", f"/v1/content-items/{bad['content_item_id']}/retry-processing", user))
+    await worker.drain(db)
+    assert ok(await call(client, "GET", f"/v1/lessons/{lesson['lesson_id']}", user))["status"] == "PROCESSING_FAILED"
+    # removing it lets the lesson finish with the good file
+    r = ok(
+        await client.delete(f"{path}/{bad['content_item_id']}", headers=auth(uid(user), **{"Idempotency-Key": "rm-1"}))
+    )
+    assert r["status"] == "PROCESSING"
+    await worker.drain(db)
+    view = ok(await call(client, "GET", f"/v1/lessons/{lesson['lesson_id']}", user))
+    assert view["status"] == "READY" and [c["title"] for c in view["content"]] == ["Good notes"]
+    # removing the last file returns the lesson to DRAFT; published content can't be removed
+    published = await publish(client, view, school)
+    assert published["lesson_status"] == "PUBLISHED"
+    r = await client.delete(f"{path}/{good['content_item_id']}", headers=auth(uid(user), **{"Idempotency-Key": "rm-2"}))
+    err(r, 409, "LESSON_CONTENT_LOCKED")
+
+
+async def test_attaching_a_previously_failed_file_marks_lesson_failed(client, db, storage, school):
+    user = sarah(school)
+    bad = await upload_pdf(client, storage, user, "[fail] scan")
+    for title in ("First", "Second"):
+        lesson = ok(await call(client, "POST", "/v1/lessons", user, {"subject_id": school["subjects"]["BIO"],
+                    "academic_year_id": school["academic_year_id"], "title": title}), 201)  # fmt: skip
+        ok(await call(client, "POST", f"/v1/lessons/{lesson['lesson_id']}/content", user,
+                      {"content_item_id": bad["content_item_id"], "display_order": 1}), 201)  # fmt: skip
+        await worker.drain(db)
+        assert (
+            ok(await call(client, "GET", f"/v1/lessons/{lesson['lesson_id']}", user))["status"] == "PROCESSING_FAILED"
+        )

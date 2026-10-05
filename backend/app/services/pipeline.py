@@ -216,6 +216,24 @@ async def run_lesson_preparation(db: Database, job: dict[str, Any]) -> None:
             l=lesson["lesson_id"],
         )
         states = [await item_extraction_state(conn, i["content_item_id"]) for i in items]
+        failed = [i["content_item_id"] for i, s in zip(items, states, strict=True) if s in ("FAILED", "CANCELLED")]
+        if failed:
+            # A file that can't be read blocks the lesson until the teacher retries or removes it.
+            await execute(
+                conn,
+                "UPDATE lessons SET status = 'PROCESSING_FAILED', version = version + 1 WHERE lesson_id = :l",
+                l=lesson["lesson_id"],
+            )
+            await emit(
+                conn,
+                ctx,
+                event_type="ContentProcessingFailed",
+                aggregate_type="lesson",
+                aggregate_id=lesson["lesson_id"],
+                school_id=lesson["school_id"],
+                data={"job_id": job["job_id"], "content_item_ids": failed, "error_code": "CONTENT_ITEM_FAILED"},
+            )
+            return
         if not items or any(s != "SUCCEEDED" for s in states):
             return  # another item is still processing; its completion re-enqueues this job
         chunks = await fetch_all(

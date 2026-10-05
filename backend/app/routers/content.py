@@ -11,10 +11,10 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 from app import errors
 from app.auth import Actor, current_actor
 from app.context import RequestContext, get_context
-from app.db import execute, fetch_one, get_db
+from app.db import execute, fetch_all, fetch_one, get_db
 from app.idempotency import OpClass, run_idempotent
 from app.outbox import emit
-from app.services.pipeline import enqueue_item_processing
+from app.services.pipeline import enqueue_item_processing, item_extraction_state
 from app.services.teaching import require_teacher
 from app.storage import get_storage, object_key_for
 
@@ -173,3 +173,64 @@ async def complete_upload(
         return 200, _item_view(row)
 
     return await run_idempotent(request, actor, body, handler, op_class=OpClass.CONTENT, school_id=item["school_id"])
+
+
+# ------------------------------------------------------------------------------------------------
+# POST /v1/content-items/{id}/retry-processing — retry a file whose processing failed
+# ------------------------------------------------------------------------------------------------
+@router.post("/content-items/{content_item_id}/retry-processing")
+async def retry_processing(
+    content_item_id: UUID,
+    request: Request,
+    actor: Actor = Depends(current_actor),
+    ctx: RequestContext = Depends(get_context),
+) -> JSONResponse:
+    async with get_db().connect() as conn:
+        item = await fetch_one(conn, "SELECT * FROM content_items WHERE content_item_id = :c", c=content_item_id)
+        if item is None:
+            raise errors.not_found("content_item", content_item_id=str(content_item_id))
+        teacher = await require_teacher(conn, actor)
+    if teacher.school_id != item["school_id"]:
+        raise errors.not_found("content_item", content_item_id=str(content_item_id))
+    request.state.school_id = str(item["school_id"])
+
+    async def handler(conn: AsyncConnection):
+        # Lock the item so two retries can't both enqueue.
+        await fetch_one(
+            conn, "SELECT 1 AS x FROM content_items WHERE content_item_id = :c FOR UPDATE", c=content_item_id
+        )
+        state = await item_extraction_state(conn, content_item_id)
+        if state not in ("FAILED", "CANCELLED"):
+            raise errors.AppError(
+                "RETRY_NOT_ALLOWED",
+                409,
+                "Only a file whose processing failed can be retried.",
+                {"processing_status": state},
+            )
+        await enqueue_item_processing(conn, item["school_id"], content_item_id)
+        lessons = await fetch_all(
+            conn,
+            """UPDATE lessons l SET status = 'PROCESSING', version = l.version + 1
+                 FROM lesson_content lc
+                WHERE lc.lesson_id = l.lesson_id AND lc.content_item_id = :c AND l.status = 'PROCESSING_FAILED'
+                RETURNING l.lesson_id""",
+            c=content_item_id,
+        )
+        await emit(
+            conn,
+            ctx,
+            event_type="ContentProcessingRetried",
+            aggregate_type="content_item",
+            aggregate_id=content_item_id,
+            school_id=item["school_id"],
+            data={"content_item_id": content_item_id, "lesson_ids": [r["lesson_id"] for r in lessons]},
+        )
+        return 200, {
+            "content_item_id": content_item_id,
+            "processing_status": "QUEUED",
+            "lessons_reprocessing": [r["lesson_id"] for r in lessons],
+        }
+
+    return await run_idempotent(
+        request, actor, {"retry": str(content_item_id)}, handler, op_class=OpClass.CONTENT, school_id=item["school_id"]
+    )

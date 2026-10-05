@@ -22,7 +22,8 @@ AI-powered Learning OS. Product and technical design live in the claude.ai **aay
   - [x] §6.1–6.4 upload → lesson → attach → (stubbed) processing → publish → fan-out
   - [x] §6.5 Student Home / My Learning / lesson progress
   - [x] §14 Slice 1 golden path + failure injections green
-  - [ ] Apply pending migration 021 (questions ↔ generation link + answer_spec) to Supabase
+  - [x] Migration 021 (questions ↔ generation link + answer_spec) applied to Supabase
+  - [x] v1.3: publish a published lesson to more sections; retry / remove a failed file
   - [ ] Real AI model behind `ContentAI`, real Supabase Storage behind `StorageGateway`
 - [ ] **Slice 2** — learning → mastery → spaced review (§7)
 

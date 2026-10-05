@@ -28,6 +28,7 @@ from app.services.teaching import (
 router = APIRouter(prefix="/v1", tags=["lessons"])
 
 EDITABLE = ("DRAFT", "PROCESSING", "PROCESSING_FAILED", "READY")
+PUBLISHABLE = ("READY", "PUBLISHED", "ACTIVE")
 PROCESSING_VIEW = {
     None: "NOT_STARTED",
     "QUEUED": "QUEUED",
@@ -151,7 +152,9 @@ async def attach_content(
             l=lesson_id,
         )
         state = await item_extraction_state(conn, body.content_item_id)
-        if state == "SUCCEEDED":  # reused, already-processed item: only re-run lesson-level stages
+        if state in ("SUCCEEDED", "FAILED"):
+            # Reused item already processed: only re-run lesson-level stages. (A previously failed item
+            # makes preparation mark the lesson PROCESSING_FAILED; the teacher can retry or remove it.)
             await enqueue_lesson_preparation(conn, lesson["school_id"], lesson_id)
         await emit(
             conn,
@@ -165,6 +168,66 @@ async def attach_content(
         return 201, {"lesson_id": lesson_id, "content_item_id": body.content_item_id, **row}
 
     return await run_idempotent(request, actor, body, handler, op_class=OpClass.CONTENT, school_id=lesson["school_id"])
+
+
+# ------------------------------------------------------------------------------------------------
+# DELETE /v1/lessons/{id}/content/{content_item_id} — remove a file (e.g. one that can't be read)
+# ------------------------------------------------------------------------------------------------
+@router.delete("/lessons/{lesson_id}/content/{content_item_id}")
+async def detach_content(
+    lesson_id: UUID,
+    content_item_id: UUID,
+    request: Request,
+    actor: Actor = Depends(current_actor),
+    ctx: RequestContext = Depends(get_context),
+) -> JSONResponse:
+    async with get_db().connect() as conn:
+        lesson, _ = await load_lesson_for_teacher(conn, actor, lesson_id)
+    request.state.school_id = str(lesson["school_id"])
+
+    async def handler(conn: AsyncConnection):
+        locked = await fetch_one(conn, "SELECT status FROM lessons WHERE lesson_id = :l FOR UPDATE", l=lesson_id)
+        if locked["status"] not in EDITABLE:
+            raise errors.AppError(
+                "LESSON_CONTENT_LOCKED", 409, "Published lesson content cannot change.", {"status": locked["status"]}
+            )
+        removed = await execute(
+            conn,
+            "DELETE FROM lesson_content WHERE lesson_id = :l AND content_item_id = :c",
+            l=lesson_id,
+            c=content_item_id,
+        )
+        if not removed:
+            raise errors.not_found("lesson_content", content_item_id=str(content_item_id))
+        remaining = await fetch_one(conn, "SELECT count(*) AS n FROM lesson_content WHERE lesson_id = :l", l=lesson_id)
+        new_status = "PROCESSING" if remaining["n"] else "DRAFT"
+        row = await fetch_one(
+            conn,
+            "UPDATE lessons SET status = :st, version = version + 1 WHERE lesson_id = :l RETURNING status, version",
+            st=new_status,
+            l=lesson_id,
+        )
+        if remaining["n"]:
+            await enqueue_lesson_preparation(conn, lesson["school_id"], lesson_id)
+        await emit(
+            conn,
+            ctx,
+            event_type="LessonContentDetached",
+            aggregate_type="lesson",
+            aggregate_id=lesson_id,
+            school_id=lesson["school_id"],
+            data={"lesson_id": lesson_id, "content_item_id": content_item_id},
+        )
+        return 200, {"lesson_id": lesson_id, "content_item_id": content_item_id, **row}
+
+    return await run_idempotent(
+        request,
+        actor,
+        {"detach": str(content_item_id)},
+        handler,
+        op_class=OpClass.CONTENT,
+        school_id=lesson["school_id"],
+    )
 
 
 # ------------------------------------------------------------------------------------------------
@@ -366,7 +429,10 @@ async def publish_lesson(
             raise errors.version_conflict(
                 entity="lessons", id=str(lesson_id), expected_version=body.version, current_version=live["version"]
             )
-        if live["status"] != "READY":
+        # v1.3 (doc 21, Oct 5): a READY lesson is published for the first time; an already PUBLISHED
+        # lesson may be published again to ANOTHER section/student (same approved generation, since
+        # published content is locked).
+        if live["status"] not in PUBLISHABLE:
             raise errors.lesson_not_ready(status=live["status"])
         gen = await current_generation(conn, lesson_id)
         if gen is None or gen["version"] != body.reviewed_generation_version:
@@ -374,13 +440,34 @@ async def publish_lesson(
                 reviewed_generation_version=body.reviewed_generation_version,
                 current_generation_version=gen["version"] if gen else None,
             )
+        existing = await fetch_one(
+            conn,
+            """SELECT a.assignment_id FROM assignments a JOIN assignment_targets t USING (assignment_id)
+                WHERE a.lesson_id = :l AND a.status NOT IN ('CLOSED', 'ARCHIVED')
+                  AND t.target_type = :tt
+                  AND (t.section_id = :sec OR t.student_id = :st)""",
+            l=lesson_id,
+            tt=body.target.type,
+            sec=body.target.section_id,
+            st=body.target.student_id,
+        )
+        if existing:
+            raise errors.AppError(
+                "ALREADY_PUBLISHED_TO_TARGET",
+                409,
+                "This lesson is already assigned to that section/student.",
+                {"assignment_id": str(existing["assignment_id"])},
+            )
+        first_publish = live["status"] == "READY"
         updated = await update_versioned(
             conn,
             "lessons",
             "lesson_id",
             lesson_id,
             body.version,
-            {"approved_by": actor.user_id, "approved_at": now, "status": "PUBLISHED", "published_at": now},
+            {"approved_by": actor.user_id, "approved_at": now, "status": "PUBLISHED", "published_at": now}
+            if first_publish
+            else {},  # later publishes keep the original approval; version still bumps (double-tap guard)
         )
         scheduled = body.available_from is not None and body.available_from > now
         assignment = await fetch_one(
