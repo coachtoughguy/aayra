@@ -5,7 +5,7 @@ so the event exists if and only if the change committed. A worker publishes PEND
 """
 
 import json
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -18,7 +18,7 @@ from app.db import execute
 def _jsonable(value: Any) -> Any:
     if isinstance(value, UUID):
         return str(value)
-    if isinstance(value, datetime):
+    if isinstance(value, datetime | date):
         return value.isoformat()
     if isinstance(value, dict):
         return {k: _jsonable(v) for k, v in value.items()}

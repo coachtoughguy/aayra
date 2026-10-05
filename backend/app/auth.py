@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 from app import errors
 from app.config import get_settings
-from app.db import fetch_all, fetch_one, get_db
+from app.db import execute, fetch_all, fetch_one, get_db
 
 RoleCode = Literal["STUDENT", "TEACHER", "PARENT_GUARDIAN", "SCHOOL_ADMIN", "PRINCIPAL"]
 
@@ -60,7 +60,11 @@ async def load_actor(conn: AsyncConnection, user_id: UUID) -> Actor:
     )
     if user is None:
         raise errors.unauthenticated("No Aayra account for this identity.")
-    if user["account_status"] != "ACTIVE":
+    if user["account_status"] == "INVITED":
+        # A valid Supabase token for an invited user proves they accepted the invite and set
+        # credentials: activate on first authenticated request.
+        await activate_invited_user(conn, user_id)
+    elif user["account_status"] != "ACTIVE":
         raise errors.AppError("ACCOUNT_INACTIVE", 403, "This account is not active.")
     rows = await fetch_all(
         conn,
@@ -79,6 +83,21 @@ async def load_actor(conn: AsyncConnection, user_id: UUID) -> Actor:
     )
 
 
+async def activate_invited_user(conn: AsyncConnection, user_id: UUID) -> None:
+    await execute(
+        conn,
+        """UPDATE users SET account_status = 'ACTIVE', last_login_at = now()
+            WHERE user_id = :u AND account_status = 'INVITED'""",
+        u=user_id,
+    )
+    await execute(
+        conn,
+        """UPDATE account_activation_state SET state = 'activated'
+            WHERE user_id = :u AND state <> 'activated'""",
+        u=user_id,
+    )
+
+
 async def current_actor(request: Request) -> Actor:
     """FastAPI dependency: every authenticated endpoint takes `actor: Actor = Depends(...)`."""
     header = request.headers.get("authorization", "")
@@ -90,7 +109,7 @@ async def current_actor(request: Request) -> Actor:
         user_id = UUID(claims["sub"])
     except ValueError as exc:
         raise errors.unauthenticated("Token subject is not a user id.") from exc
-    async with get_db().connect() as conn:
+    async with get_db().begin() as conn:  # begin(): first login may activate the account
         actor = await load_actor(conn, user_id)
     request.state.actor_id = str(actor.user_id)
     return actor

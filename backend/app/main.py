@@ -9,7 +9,7 @@ from app.config import get_settings
 from app.context import install_context
 from app.db import get_db
 from app.errors import install_error_handlers
-from app.routers import health
+from app.routers import admin_bootstrap, health
 
 
 @asynccontextmanager
@@ -29,6 +29,7 @@ def create_app() -> FastAPI:
     install_error_handlers(app)
     install_context(app)
     app.include_router(health.router)
+    app.include_router(admin_bootstrap.router)
     return app
 
 

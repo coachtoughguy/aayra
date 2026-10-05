@@ -17,6 +17,14 @@ class Settings(BaseSettings):
     jwt_audience: str = "authenticated"
     jwt_algorithms: tuple[str, ...] = ("HS256",)
 
+    # Platform-operator secret for POST /v1/schools (contract §5 "bootstrap-only auth").
+    # Unset = school bootstrap disabled.
+    bootstrap_key: str | None = None
+
+    # Login provisioning: "stub" (local/tests) or "supabase" (not wired yet).
+    identity_provider: str = "stub"
+    invite_ttl_days: int = 7
+
     environment: str = "local"
     log_level: str = "INFO"
 

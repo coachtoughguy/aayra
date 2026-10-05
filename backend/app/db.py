@@ -60,3 +60,16 @@ async def fetch_all(conn: AsyncConnection, sql: str, **params: Any) -> list[dict
 
 async def execute(conn: AsyncConnection, sql: str, **params: Any) -> int:
     return (await conn.execute(text(sql), params)).rowcount
+
+
+def constraint_name(exc: BaseException) -> str | None:
+    """Name of the violated constraint/index behind a SQLAlchemy IntegrityError (asyncpg)."""
+    seen: set[int] = set()
+    cur: BaseException | None = exc
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        name = getattr(cur, "constraint_name", None)
+        if name:
+            return name
+        cur = getattr(cur, "orig", None) or cur.__cause__
+    return None
