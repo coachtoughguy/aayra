@@ -19,9 +19,11 @@ AI-powered Learning OS. Product and technical design live in the claude.ai **aay
 - [ ] **Slice 1** — bootstrap (§5) → content/lesson/publish (§6) → Student Home
   - [x] Shared plumbing: auth + tenancy, error envelope, idempotency, optimistic concurrency, outbox, request context
   - [x] §5 minimal admin bootstrap + seed script (`uv run python -m app.devtools.seed_demo`)
-  - [ ] §6.1–6.4 upload → lesson → attach → (stubbed) processing → publish → fan-out
-  - [ ] §6.5 Student Home / My Learning / lesson progress
-  - [ ] §14 Slice 1 golden path + failure injections green
+  - [x] §6.1–6.4 upload → lesson → attach → (stubbed) processing → publish → fan-out
+  - [x] §6.5 Student Home / My Learning / lesson progress
+  - [x] §14 Slice 1 golden path + failure injections green
+  - [ ] Apply pending migration 021 (questions ↔ generation link + answer_spec) to Supabase
+  - [ ] Real AI model behind `ContentAI`, real Supabase Storage behind `StorageGateway`
 - [ ] **Slice 2** — learning → mastery → spaced review (§7)
 
 ## Demo data
@@ -34,6 +36,14 @@ cd backend && AAYRA_BOOTSTRAP_KEY=local-key uv run python -m app.devtools.seed_d
 Creates *Aayra Demo High School → 2026-27 → Grade 10 → 10A* with Biology and Mathematics,
 Sarah Johnson (Class Teacher + Primary Biology), Ravi Kumar (Primary Maths), Priya Nair
 (Biology co-teacher) and 28 students — all through the public API.
+
+## Background worker
+
+Content processing, lesson preparation, assignment fan-out and scheduled releases run as jobs:
+
+```bash
+cd backend && uv run python -m app.worker
+```
 
 ## Running tests
 
