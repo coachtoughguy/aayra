@@ -10,8 +10,8 @@ Safety rules baked into every prompt:
   the model is never asked to go beyond the lesson).
 
 Source support for extraction: PDF (native document input), IMAGE/PHOTO (vision), WEB_LINK (page
-text fetched server-side). VIDEO/AUDIO/YOUTUBE need a transcription provider and DOCUMENT (Word)
-needs a converter: they fail with UNSUPPORTED_SOURCE_TYPE until those are added.
+text fetched server-side). VIDEO/AUDIO (speech-to-text), YOUTUBE (provided transcript) and DOCUMENT
+(.docx parser) never reach this class: app.ai.sources turns them into chunks first.
 """
 
 import base64
@@ -255,7 +255,7 @@ class ClaudeContentAI:
             return [{"type": "text", "text": f"<material>{text[:200_000]}</material>"}]
         raise ContentExtractionError(
             "UNSUPPORTED_SOURCE_TYPE",
-            f"{ctype} needs transcription/conversion support that is not connected yet.",
+            f"{ctype} is prepared by app.ai.sources (transcription / transcript / .docx parser), not the model.",
         )
 
     async def extract(self, item: dict[str, Any]) -> tuple[list[Chunk], Usage]:

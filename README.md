@@ -35,7 +35,11 @@ AI-powered Learning OS. Product and technical design live in the claude.ai **aay
   - [x] Teacher feedback: AI draft → teacher edit → publish → student notification
   - [x] Deliverable submissions (SUBMISSION_REQUIRED / BOTH), late labelling, resubmission history, teacher queue
   - [x] Parent and self assignments (create → prepare → preview → assign); guardian linking
-  - [ ] Video/audio/YouTube transcription, Word conversion, marks on submissions, school-less self-learners
+  - [x] Video/audio transcription, YouTube via provided transcript, Word (.docx) — see `docs/22e_*`
+  - [x] Marks on submissions (optional, teacher-only or student-visible, released by the teacher)
+  - [x] Parents/students can change files until the work is assigned
+  - [x] Independent 18+ self-learners (private personal space)
+  - [ ] Apply pending migration 023 to Supabase
 
 ## Demo data
 

@@ -16,6 +16,7 @@ from app.routers import (
     family_learning,
     feedback,
     health,
+    independent,
     learning,
     lessons,
     students,
@@ -51,6 +52,7 @@ def create_app() -> FastAPI:
     app.include_router(submissions.router)
     app.include_router(feedback.router)
     app.include_router(family_learning.router)
+    app.include_router(independent.router)
     return app
 
 

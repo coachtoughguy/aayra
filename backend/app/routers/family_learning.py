@@ -13,8 +13,10 @@ Rules:
 - No dependency/sequencing configuration and no teacher-grade editing (doc 21 v0.9).
 - Parent/self lessons and assignments are private: teachers can't open them (services/teaching.py).
 - Only guardians with an ACTIVE link (and the PARENT_GUARDIAN role in the child's school) can assign.
-- Self-learning here is for enrolled students (13+, inside their school/year). Unaffiliated 18+
-  self-learners need a school-less tenancy model that does not exist in the schema yet.
+- Files can be added or removed until the work is assigned (Oct 20 decision); after that the content
+  is locked, like any active assignment, and they create a new assignment instead.
+- Self-learning works for enrolled students and for independent 18+ learners, whose private
+  "personal space" is shaped like a school (routers/independent.py).
 """
 
 from datetime import UTC, datetime
@@ -32,6 +34,7 @@ from app.context import RequestContext, get_context
 from app.db import execute, fetch_all, fetch_one, get_db
 from app.idempotency import OpClass, run_idempotent
 from app.outbox import emit
+from app.routers.content import is_uploaded
 from app.routers.learning import student_ctx
 from app.services.pipeline import enqueue_lesson_preparation, item_extraction_state
 
@@ -127,7 +130,7 @@ async def _create(
     item_ids = list(dict.fromkeys(body.content_item_ids))
     items = await fetch_all(
         conn,
-        """SELECT content_item_id, object_key, source_url FROM content_items
+        """SELECT content_item_id, content_type, object_key, source_url FROM content_items
             WHERE content_item_id = ANY(:ids) AND uploaded_by = :u AND school_id = :s""",
         ids=item_ids,
         u=actor.user_id,
@@ -135,8 +138,10 @@ async def _create(
     )
     if len(items) != len(item_ids):
         raise errors.not_found("content_item", detail="Use content you uploaded for this student.")
-    if any(not (i["object_key"] or i["source_url"]) for i in items):
-        raise errors.AppError("CONTENT_NOT_UPLOADED", 409, "Finish uploading every file first.")
+    if not all(is_uploaded(i) for i in items):
+        raise errors.AppError(
+            "CONTENT_NOT_UPLOADED", 409, "Finish uploading every file (and YouTube transcripts) first."
+        )
 
     lesson = await fetch_one(
         conn,
@@ -367,3 +372,116 @@ async def assign_self(
 ) -> JSONResponse:  # fmt: skip
     await student_ctx(actor, request)
     return await _assign(request, actor, ctx, assignment_id, body, "SELF")
+
+
+# ------------------------------------------------------------------------------------------------
+# Add / remove files — only before the work is assigned (Oct 20 decision)
+# ------------------------------------------------------------------------------------------------
+MAX_FILES = 10
+
+
+class AddContentIn(BaseModel):
+    content_item_id: UUID
+    version: int = Field(ge=1)
+
+
+async def _edit_content(
+    request: Request, actor: Actor, ctx: RequestContext, assignment_id: UUID, source: Source, *,
+    version: int, add: UUID | None = None, remove: UUID | None = None, body: BaseModel | dict,
+):  # fmt: skip
+    async def handler(conn: AsyncConnection):
+        row = await _own_assignment(conn, actor, assignment_id, source, lock=True)
+        if row["status"] != "DRAFT":
+            raise errors.AppError(
+                "CONTENT_LOCKED", 409, "This was already assigned, so its files can't change. Create a new assignment."
+            )
+        if row["version"] != version:
+            raise errors.version_conflict(entity="assignments", id=str(assignment_id), expected_version=version,
+                                          current_version=row["version"])  # fmt: skip
+        lesson_id = row["lesson_id"]
+        await fetch_one(conn, "SELECT 1 AS x FROM lessons WHERE lesson_id = :l FOR UPDATE", l=lesson_id)
+        attached = await fetch_all(
+            conn, "SELECT content_item_id, display_order FROM lesson_content WHERE lesson_id = :l", l=lesson_id
+        )
+        ids = {a["content_item_id"] for a in attached}
+        if add is not None:
+            item = await fetch_one(
+                conn, "SELECT * FROM content_items WHERE content_item_id = :c AND uploaded_by = :u AND school_id = :s",
+                c=add, u=actor.user_id, s=row["school_id"],
+            )  # fmt: skip
+            if item is None:
+                raise errors.not_found("content_item", detail="Use content you uploaded for this student.")
+            if not is_uploaded(item):
+                raise errors.AppError("CONTENT_NOT_UPLOADED", 409, "Finish uploading this file first.")
+            if add in ids:
+                raise errors.AppError("CONTENT_ALREADY_ATTACHED", 409, "This file is already part of it.")
+            if len(ids) >= MAX_FILES:
+                raise errors.AppError("TOO_MANY_FILES", 409, f"Up to {MAX_FILES} files.")
+            await execute(
+                conn, "INSERT INTO lesson_content (lesson_id, content_item_id, display_order) VALUES (:l, :c, :o)",
+                l=lesson_id, c=add, o=max((a["display_order"] for a in attached), default=0) + 1,
+            )  # fmt: skip
+            prepare_now = await item_extraction_state(conn, add) in ("SUCCEEDED", "FAILED")
+        else:
+            if remove not in ids:
+                raise errors.not_found("lesson_content", content_item_id=str(remove))
+            if len(ids) == 1:
+                raise errors.AppError("LAST_FILE", 409, "Keep at least one file, or add another before removing this.")
+            await execute(conn, "DELETE FROM lesson_content WHERE lesson_id = :l AND content_item_id = :c",
+                          l=lesson_id, c=remove)  # fmt: skip
+            prepare_now = True
+        # Any change to the files invalidates what was prepared: prepare again.
+        await execute(
+            conn, "UPDATE lessons SET status = 'PROCESSING', version = version + 1 WHERE lesson_id = :l", l=lesson_id
+        )
+        if prepare_now:
+            await enqueue_lesson_preparation(conn, row["school_id"], lesson_id)
+        await execute(conn, "UPDATE assignments SET version = version + 1 WHERE assignment_id = :a", a=assignment_id)
+        await emit(
+            conn, ctx, event_type="LessonContentAttached" if add else "LessonContentDetached", aggregate_type="lesson",
+            aggregate_id=lesson_id, school_id=row["school_id"],
+            data={"lesson_id": lesson_id, "assignment_id": assignment_id, "content_item_id": add or remove,
+                  "source": source},
+        )  # fmt: skip
+        fresh = await _own_assignment(conn, actor, assignment_id, source)
+        return (201 if add else 200), await _view(conn, fresh)
+
+    return await run_idempotent(request, actor, body, handler, op_class=OpClass.CONTENT)
+
+
+@router.post("/parent-assignments/{assignment_id}/content", status_code=201)
+async def parent_add_content(
+    assignment_id: UUID, body: AddContentIn, request: Request, actor: Actor = Depends(current_actor),
+    ctx: RequestContext = Depends(get_context),
+) -> JSONResponse:  # fmt: skip
+    return await _edit_content(request, actor, ctx, assignment_id, "PARENT", version=body.version,
+                               add=body.content_item_id, body=body)  # fmt: skip
+
+
+@router.delete("/parent-assignments/{assignment_id}/content/{content_item_id}")
+async def parent_remove_content(
+    assignment_id: UUID, content_item_id: UUID, version: int, request: Request,
+    actor: Actor = Depends(current_actor), ctx: RequestContext = Depends(get_context),
+) -> JSONResponse:  # fmt: skip
+    return await _edit_content(request, actor, ctx, assignment_id, "PARENT", version=version, remove=content_item_id,
+                               body={"remove": str(content_item_id), "version": version})  # fmt: skip
+
+
+@router.post("/self-assignments/{assignment_id}/content", status_code=201)
+async def self_add_content(
+    assignment_id: UUID, body: AddContentIn, request: Request, actor: Actor = Depends(current_actor),
+    ctx: RequestContext = Depends(get_context),
+) -> JSONResponse:  # fmt: skip
+    await student_ctx(actor, request)
+    return await _edit_content(request, actor, ctx, assignment_id, "SELF", version=body.version,
+                               add=body.content_item_id, body=body)  # fmt: skip
+
+
+@router.delete("/self-assignments/{assignment_id}/content/{content_item_id}")
+async def self_remove_content(
+    assignment_id: UUID, content_item_id: UUID, version: int, request: Request,
+    actor: Actor = Depends(current_actor), ctx: RequestContext = Depends(get_context),
+) -> JSONResponse:  # fmt: skip
+    await student_ctx(actor, request)
+    return await _edit_content(request, actor, ctx, assignment_id, "SELF", version=version, remove=content_item_id,
+                               body={"remove": str(content_item_id), "version": version})  # fmt: skip

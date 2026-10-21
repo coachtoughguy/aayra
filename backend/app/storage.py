@@ -51,6 +51,7 @@ class StorageGateway(Protocol):
     async def object_size(self, object_key: str) -> int | None: ...
     async def download(self, object_key: str) -> bytes: ...
     async def signed_download_url(self, object_key: str, expires_in: int = 3600) -> str: ...
+    async def upload(self, object_key: str, data: bytes, content_type: str) -> None: ...
 
 
 @dataclass
@@ -73,6 +74,9 @@ class StubStorage:
 
     async def signed_download_url(self, object_key: str, expires_in: int = 3600) -> str:
         return f"stub://{BUCKET}/{object_key}?download=1&expires_in={expires_in}"
+
+    async def upload(self, object_key: str, data: bytes, content_type: str) -> None:
+        self.put(object_key, len(data), data)
 
     def put(self, object_key: str, size: int, content: bytes | None = None) -> None:
         self.objects[object_key] = size
@@ -120,6 +124,16 @@ class SupabaseStorage:
         if r.status_code >= 400:
             raise StorageError(f"signed download failed: {r.status_code}")
         return self.base + r.json()["signedURL"]
+
+    async def upload(self, object_key: str, data: bytes, content_type: str) -> None:
+        """Server-side write (e.g. a pasted transcript). Overwrites, so retries are safe."""
+        r = await self.client.post(
+            f"{self.base}/object/{self._path(object_key)}",
+            headers={**self.headers, "content-type": content_type, "x-upsert": "true"},
+            content=data,
+        )
+        if r.status_code >= 400:
+            raise StorageError(f"upload failed: {r.status_code} {r.text[:200]}")
 
 
 _storage: StorageGateway | None = None

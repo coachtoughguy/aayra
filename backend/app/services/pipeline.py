@@ -17,6 +17,7 @@ from uuid import UUID, uuid4
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from app.ai.content_ai import ContentExtractionError, Usage, get_content_ai
+from app.ai.sources import extract_item, model_for
 from app.context import RequestContext
 from app.db import Database, execute, fetch_all, fetch_one
 from app.outbox import emit
@@ -83,6 +84,8 @@ async def log_invocation(
     usage: Usage | None,
     latency_ms: int,
     status: str,
+    model_name: str | None = None,
+    prompt_version: str | None = None,
 ) -> None:
     ai = get_content_ai()
     await execute(
@@ -94,8 +97,8 @@ async def log_invocation(
         p=purpose,
         et=entity_type,
         eid=entity_id,
-        m=ai.model_name,
-        pv=ai.prompt_version,
+        m=model_name or ai.model_name,
+        pv=prompt_version or ai.prompt_version,
         it=usage.input_tokens if usage else None,
         ot=usage.output_tokens if usage else None,
         lat=latency_ms,
@@ -111,38 +114,42 @@ async def run_extraction_job(db: Database, job: dict[str, Any]) -> None:
         assert item is not None
         started = time.perf_counter()
         try:
-            chunks, usage = await get_content_ai().extract(item)
+            extraction = await extract_item(item)
         except ContentExtractionError as exc:
+            model = model_for(item["content_type"])
+            if model:
+                await log_invocation(
+                    conn,
+                    school_id=job["school_id"],
+                    purpose="CONTENT_EXTRACTION",
+                    entity_type="content_item",
+                    entity_id=item["content_item_id"],
+                    usage=None,
+                    latency_ms=int((time.perf_counter() - started) * 1000),
+                    status="FAILED",
+                    model_name=model[0],
+                    prompt_version=model[1],
+                )
+            await mark_extraction_failed(conn, ctx, job, item, exc.code, str(exc))
+            return
+        chunks = extraction.chunks
+        if extraction.model_name:
             await log_invocation(
                 conn,
                 school_id=job["school_id"],
                 purpose="CONTENT_EXTRACTION",
                 entity_type="content_item",
                 entity_id=item["content_item_id"],
-                usage=None,
-                latency_ms=int((time.perf_counter() - started) * 1000),
-                status="FAILED",
+                usage=extraction.usage,
+                latency_ms=extraction.latency_ms,
+                status="SUCCEEDED",
+                model_name=extraction.model_name,
+                prompt_version=extraction.prompt_version,
             )
-            await execute(
-                conn,
-                """UPDATE content_processing_jobs SET status = 'FAILED', completed_at = now(),
-                          error_code = :code, error_message = :msg WHERE job_id = :j""",
-                j=job["job_id"],
-                code=exc.code,
-                msg=str(exc),
-            )
-            await _fail_lessons_using(conn, ctx, item, exc.code, job["job_id"])
-            return
-        await log_invocation(
-            conn,
-            school_id=job["school_id"],
-            purpose="CONTENT_EXTRACTION",
-            entity_type="content_item",
-            entity_id=item["content_item_id"],
-            usage=usage,
-            latency_ms=int((time.perf_counter() - started) * 1000),
-            status="SUCCEEDED",
-        )
+        if extraction.item_updates:
+            cols = ", ".join(f"{k} = :{k}" for k in extraction.item_updates)
+            await execute(conn, f"UPDATE content_items SET {cols} WHERE content_item_id = :c",
+                          c=item["content_item_id"], **extraction.item_updates)  # fmt: skip
         for ch in chunks:
             await execute(
                 conn,
@@ -156,7 +163,7 @@ async def run_extraction_job(db: Database, job: dict[str, Any]) -> None:
                 p=ch.page_number,
                 ss=ch.start_seconds,
                 es=ch.end_seconds,
-                m=get_content_ai().model_name,
+                m=extraction.method,
             )
         await execute(
             conn,
@@ -174,6 +181,28 @@ async def run_extraction_job(db: Database, job: dict[str, Any]) -> None:
         )
         for lesson in await _processing_lessons_using(conn, item["content_item_id"]):
             await enqueue_lesson_preparation(conn, lesson["school_id"], lesson["lesson_id"])
+
+
+async def mark_extraction_failed(
+    conn: AsyncConnection, ctx: RequestContext, job: dict[str, Any], item: dict, code: str, message: str
+) -> None:
+    await execute(
+        conn,
+        """UPDATE content_processing_jobs SET status = 'FAILED', completed_at = now(),
+                  error_code = :code, error_message = :msg WHERE job_id = :j""",
+        j=job["job_id"],
+        code=code,
+        msg=message[:2000],
+    )
+    await _fail_lessons_using(conn, ctx, item, code, job["job_id"])
+
+
+async def fail_extraction_after_retries(db: Database, job: dict[str, Any], message: str) -> None:
+    """Called by the worker when an item keeps failing for transient reasons (provider outage):
+    the file is marked failed and its lessons show it, so the uploader can retry later."""
+    async with db.begin() as conn:
+        item = await fetch_one(conn, "SELECT * FROM content_items WHERE content_item_id = :c", c=job["content_item_id"])
+        await mark_extraction_failed(conn, system_context(job["job_id"]), job, item, "PROVIDER_UNAVAILABLE", message)
 
 
 async def _processing_lessons_using(conn: AsyncConnection, content_item_id: UUID) -> list[dict]:

@@ -39,6 +39,18 @@ class Settings(BaseSettings):
     ai_model: str | None = None
     ai_timeout_seconds: float = 60.0
 
+    # Speech-to-text for VIDEO/AUDIO: "stub" (local/tests) or "openai" (OpenAI audio transcriptions API).
+    transcription_provider: str = "stub"
+    openai_api_key: str | None = None
+    openai_base_url: str = "https://api.openai.com"
+    # Required when transcription_provider=openai: the exact transcription model id (e.g. whisper-1).
+    transcription_model: str | None = None
+    transcription_timeout_seconds: float = 300.0
+    max_media_seconds: int = 4 * 3600
+
+    # Optional: YouTube Data API key, used only to read a video's public title/description/duration.
+    youtube_api_key: str | None = None
+
     environment: str = "local"
     log_level: str = "INFO"
 

@@ -101,6 +101,8 @@ Supported source types with the real model:
 
 ## 5. Known gaps / next decisions
 
+Items 1–4 below were built in the next increment; see `22e_Media_Documents_Marks_and_Independent_Learners.md`.
+
 1. A transcription provider for video, audio and YouTube, and a Word → PDF converter.
 2. Marks or grades on submissions (currently feedback only).
 3. Parents can't add or remove files after creating an assignment. For now they create a new one.

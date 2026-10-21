@@ -65,6 +65,8 @@ async def run_once(db: Database) -> bool:
                     msg=repr(exc)[:2000],
                     j=job["job_id"],
                 )
+            if final:  # don't leave lessons waiting forever on a file that never processed
+                await pipeline.fail_extraction_after_retries(db, job, repr(exc))
         return True
 
     job = await _claim_background_job(db)

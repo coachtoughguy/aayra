@@ -17,6 +17,7 @@ from app.context import RequestContext, get_context
 from app.db import constraint_name, execute, fetch_all, fetch_one, get_db
 from app.idempotency import OpClass, run_idempotent
 from app.outbox import emit
+from app.routers.content import is_uploaded
 from app.services.distribution import distribution_status
 from app.services.pipeline import enqueue_lesson_preparation, item_extraction_state
 from app.services.teaching import (
@@ -125,7 +126,7 @@ async def attach_content(
         )  # fmt: skip
         if item is None:
             raise errors.not_found("content_item", content_item_id=str(body.content_item_id))
-        if not (item["object_key"] or item["source_url"]):
+        if not is_uploaded(item):
             raise errors.AppError(
                 "CONTENT_NOT_UPLOADED", 409, "Finish uploading this file before attaching it to a lesson."
             )
@@ -375,11 +376,16 @@ class PublishIn(BaseModel):
     completion_mode: Literal["LEARNING_COMPLETION", "SUBMISSION_REQUIRED", "BOTH"] = "LEARNING_COMPLETION"
     title: str = Field(min_length=1, max_length=300)
     instructions: str | None = None
+    # Optional marks (doc 12): only for work that takes a submission; teacher-only unless chosen otherwise.
+    max_marks: float | None = Field(default=None, gt=0, le=10_000)
+    marks_visibility: Literal["TEACHER_ONLY", "STUDENT_VISIBLE"] = "TEACHER_ONLY"
 
     @model_validator(mode="after")
     def _dates(self):
         if self.available_from and self.due_at <= self.available_from:
             raise ValueError("due_at must be after available_from")
+        if self.max_marks is not None and self.completion_mode == "LEARNING_COMPLETION":
+            raise ValueError("max_marks is only for assignments that take a submission")
         return self
 
 
@@ -474,8 +480,8 @@ async def publish_lesson(
             conn,
             """INSERT INTO assignments (school_id, lesson_id, created_by, source_type, completion_mode, title,
                                         instructions, available_from, due_at, status, allow_late_submission,
-                                        published_at)
-               VALUES (:s, :l, :u, 'SCHOOL', :cm, :t, :i, :af, :due, :st, :late, :now)
+                                        published_at, max_marks, marks_visibility)
+               VALUES (:s, :l, :u, 'SCHOOL', :cm, :t, :i, :af, :due, :st, :late, :now, :mm, :mv)
                RETURNING assignment_id, status, version""",
             s=lesson["school_id"],
             l=lesson_id,
@@ -488,6 +494,8 @@ async def publish_lesson(
             st="SCHEDULED" if scheduled else "PUBLISHED",
             late=body.allow_late_submission,
             now=now,
+            mm=body.max_marks,
+            mv=body.marks_visibility,
         )
         aid = assignment["assignment_id"]
         await execute(
@@ -520,6 +528,7 @@ async def publish_lesson(
                 "student_id": body.target.student_id,
                 "due_at": body.due_at,
                 "completion_mode": body.completion_mode,
+                "max_marks": body.max_marks,
                 "generation_version": body.reviewed_generation_version,
             },
         )
@@ -566,6 +575,8 @@ async def get_assignment(assignment_id: UUID, request: Request, actor: Actor = D
             "available_from": a["available_from"],
             "due_at": a["due_at"],
             "completion_mode": a["completion_mode"],
+            "max_marks": float(a["max_marks"]) if a["max_marks"] is not None else None,
+            "marks_visibility": a["marks_visibility"],
             **dist,
         },
         "meta": {"request_id": request.state.request_id},

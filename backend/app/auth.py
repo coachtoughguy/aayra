@@ -116,6 +116,29 @@ async def current_actor(request: Request) -> Actor:
 
 
 @dataclass(frozen=True)
+class Identity:
+    """A verified login that may not have an Aayra account yet (self-signup)."""
+
+    user_id: UUID
+    email: str | None
+
+
+async def current_identity(request: Request) -> Identity:
+    header = request.headers.get("authorization", "")
+    scheme, _, token = header.partition(" ")
+    if scheme.lower() != "bearer" or not token:
+        raise errors.unauthenticated()
+    claims = decode_token(token)
+    try:
+        user_id = UUID(claims["sub"])
+    except ValueError as exc:
+        raise errors.unauthenticated("Token subject is not a user id.") from exc
+    request.state.actor_id = str(user_id)
+    email = claims.get("email")
+    return Identity(user_id, email.strip().lower() if isinstance(email, str) and email.strip() else None)
+
+
+@dataclass(frozen=True)
 class StudentContext:
     student_id: UUID
     school_id: UUID
