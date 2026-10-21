@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field, HttpUrl, model_validator
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from app import errors
-from app.auth import Actor, current_actor
+from app.auth import Actor, current_actor, resolve_student_context
 from app.context import RequestContext, get_context
 from app.db import execute, fetch_all, fetch_one, get_db
 from app.idempotency import OpClass, run_idempotent
@@ -29,6 +29,9 @@ class ContentItemIn(BaseModel):
     content_type: ContentType
     title: str | None = Field(default=None, max_length=300)
     source_url: HttpUrl | None = None
+    # SCHOOL (teacher material, default), PARENT (a guardian's material for student_id), SELF (a student's own)
+    purpose: Literal["SCHOOL", "PARENT", "SELF"] = "SCHOOL"
+    student_id: UUID | None = None
 
     @model_validator(mode="after")
     def _links(self):
@@ -36,7 +39,26 @@ class ContentItemIn(BaseModel):
             raise ValueError(f"{self.content_type} requires source_url")
         if self.content_type not in LINK_TYPES and self.source_url is not None:
             raise ValueError("source_url is only for YOUTUBE / WEB_LINK; files are uploaded")
+        if (self.purpose == "PARENT") != (self.student_id is not None):
+            raise ValueError("student_id is required for PARENT content and only allowed there")
         return self
+
+
+OWNERSHIP = {
+    "SCHOOL": ("TEACHER", "SCHOOL_ASSIGNED"),
+    "PARENT": ("PARENT", "PARENT_ASSIGNED"),
+    "SELF": ("STUDENT", "SELF_LEARNING"),
+}
+
+
+async def _owner_school(conn: AsyncConnection, actor: Actor, body: "ContentItemIn") -> UUID:
+    if body.purpose == "SCHOOL":
+        return (await require_teacher(conn, actor)).school_id
+    if body.purpose == "PARENT":
+        from app.routers.family_learning import require_guardian_of
+
+        return (await require_guardian_of(conn, actor, body.student_id))["school_id"]
+    return (await resolve_student_context(conn, actor)).school_id
 
 
 def _item_view(row: dict) -> dict:
@@ -60,15 +82,16 @@ async def create_content_item(
     ctx: RequestContext = Depends(get_context),
 ) -> JSONResponse:
     async with get_db().connect() as conn:
-        teacher = await require_teacher(conn, actor)
-    request.state.school_id = str(teacher.school_id)
+        school_id = await _owner_school(conn, actor, body)
+    request.state.school_id = str(school_id)
+    owner_type, origin_type = OWNERSHIP[body.purpose]
 
     async def handler(conn: AsyncConnection):
         row = await fetch_one(
             conn,
             """INSERT INTO content_items (school_id, content_type, title, source_url, uploaded_by)
                VALUES (:s, :t, :title, :url, :u) RETURNING *""",
-            s=teacher.school_id,
+            s=school_id,
             t=body.content_type,
             title=body.title,
             url=str(body.source_url) if body.source_url else None,
@@ -77,27 +100,29 @@ async def create_content_item(
         await execute(
             conn,
             """INSERT INTO content_ownership (content_item_id, owner_type, owner_user_id, owner_school_id, origin_type)
-               VALUES (:c, 'TEACHER', :u, :s, 'SCHOOL_ASSIGNED')""",
+               VALUES (:c, :ot, :u, :s, :origin)""",
             c=row["content_item_id"],
+            ot=owner_type,
             u=actor.user_id,
-            s=teacher.school_id,
+            s=school_id,
+            origin=origin_type,
         )
         data = _item_view(row)
         if body.content_type in LINK_TYPES:
             # Nothing to upload: a link is "uploaded" on creation and goes straight to processing.
-            await enqueue_item_processing(conn, teacher.school_id, row["content_item_id"])
+            await enqueue_item_processing(conn, school_id, row["content_item_id"])
             await emit(
                 conn,
                 ctx,
                 event_type="ContentUploadCompleted",
                 aggregate_type="content_item",
                 aggregate_id=row["content_item_id"],
-                school_id=teacher.school_id,
+                school_id=school_id,
                 data={"content_item_id": row["content_item_id"], "content_type": body.content_type},
             )
             data["upload"] = None
         else:
-            signed = await get_storage().signed_upload(object_key_for(teacher.school_id, row["content_item_id"]))
+            signed = await get_storage().signed_upload(object_key_for(school_id, row["content_item_id"]))
             data["upload"] = {
                 "object_key": signed.object_key,
                 "upload_url": signed.upload_url,
@@ -105,7 +130,7 @@ async def create_content_item(
             }
         return 201, data
 
-    return await run_idempotent(request, actor, body, handler, op_class=OpClass.CONTENT, school_id=teacher.school_id)
+    return await run_idempotent(request, actor, body, handler, op_class=OpClass.CONTENT, school_id=school_id)
 
 
 class CompleteUploadIn(BaseModel):
@@ -189,9 +214,10 @@ async def retry_processing(
         item = await fetch_one(conn, "SELECT * FROM content_items WHERE content_item_id = :c", c=content_item_id)
         if item is None:
             raise errors.not_found("content_item", content_item_id=str(content_item_id))
-        teacher = await require_teacher(conn, actor)
-    if teacher.school_id != item["school_id"]:
-        raise errors.not_found("content_item", content_item_id=str(content_item_id))
+        if item["uploaded_by"] != actor.user_id:  # the uploader (teacher, parent or student) can always retry
+            teacher = await require_teacher(conn, actor)
+            if teacher.school_id != item["school_id"]:
+                raise errors.not_found("content_item", content_item_id=str(content_item_id))
     request.state.school_id = str(item["school_id"])
 
     async def handler(conn: AsyncConnection):

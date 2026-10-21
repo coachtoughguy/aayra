@@ -1,6 +1,5 @@
 -- 022_source_scoped_mastery_and_review_mode
--- PENDING: not yet applied to the hosted project. Apply via Supabase (with Vinay's approval), then
--- rename this file to the version Supabase assigns.
+-- Applied to Supabase project aayra on 2026-10-20 (version 20261021050125), approved by Vinay.
 --
 -- Implements the Oct 5 product decision (doc 21 / 22c):
 --   * Parent-assigned and self-chosen learning is separate from school learning.

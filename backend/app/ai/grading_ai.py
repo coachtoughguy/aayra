@@ -23,6 +23,23 @@ class Judgement:
     output_tokens: int
 
 
+def question_hint(question: dict[str, Any], concept_name: str) -> str:
+    """Hints are generated WITH the question (answer_spec.hint), so the answer path never waits on a model."""
+    return (question.get("answer_spec") or {}).get(
+        "hint"
+    ) or f"Hint: think about what '{concept_name}' means before choosing."
+
+
+def question_explanation(question: dict[str, Any], concept_name: str) -> str:
+    spec = question.get("answer_spec") or {}
+    if spec.get("explanation"):
+        return spec["explanation"]
+    options = spec.get("options") or []
+    idx = spec.get("correct_index")
+    answer = options[idx] if options and idx is not None and idx < len(options) else "the accurate description"
+    return f"The answer is: {answer}. This is the key idea of '{concept_name}'."
+
+
 class GradingAI(Protocol):
     model_name: str
     prompt_version: str
@@ -30,6 +47,7 @@ class GradingAI(Protocol):
     async def judge(self, question: dict[str, Any], answer_text: str) -> Judgement: ...
     def hint(self, question: dict[str, Any], concept_name: str) -> str: ...
     def explanation(self, question: dict[str, Any], concept_name: str) -> str: ...
+    async def draft_feedback(self, context: dict[str, Any]) -> str: ...
 
 
 class StubGradingAI:
@@ -52,14 +70,22 @@ class StubGradingAI:
         return Judgement("CORRECT", 0.92, "Clear explanation with an example.", tokens, 8)
 
     def hint(self, question: dict[str, Any], concept_name: str) -> str:
-        return f"Hint: think about what '{concept_name}' means before choosing."
+        return question_hint(question, concept_name)
 
     def explanation(self, question: dict[str, Any], concept_name: str) -> str:
-        spec = question.get("answer_spec") or {}
-        options = spec.get("options") or []
-        idx = spec.get("correct_index")
-        answer = options[idx] if options and idx is not None and idx < len(options) else "the accurate description"
-        return f"The answer is: {answer}. This is the key idea of '{concept_name}'."
+        return question_explanation(question, concept_name)
+
+    async def draft_feedback(self, context: dict[str, Any]) -> str:
+        strong = [c["name"] for c in context.get("concepts", []) if c.get("status") == "MASTERED"]
+        weak = [c["name"] for c in context.get("concepts", []) if c.get("status") not in (None, "MASTERED")]
+        parts = [f"Hi {context.get('student_first_name', 'there')},"]
+        if strong:
+            parts.append(f"good work on {', '.join(strong)}.")
+        if weak:
+            parts.append(f"Let's spend a little more time on {', '.join(weak)}.")
+        if context.get("submission_note"):
+            parts.append("Thanks for your submission.")
+        return " ".join(parts)
 
 
 _ai: GradingAI | None = None
@@ -68,7 +94,14 @@ _ai: GradingAI | None = None
 def get_grading_ai() -> GradingAI:
     global _ai
     if _ai is None:
-        _ai = StubGradingAI()
+        from app.config import get_settings
+
+        if get_settings().ai_provider == "anthropic":
+            from app.ai.anthropic import ClaudeGradingAI
+
+            _ai = ClaudeGradingAI()
+        else:
+            _ai = StubGradingAI()
     return _ai
 
 

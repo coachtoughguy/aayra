@@ -25,6 +25,20 @@ class Settings(BaseSettings):
     identity_provider: str = "stub"
     invite_ttl_days: int = 7
 
+    # Object storage: "stub" (local/tests) or "supabase".
+    storage_provider: str = "stub"
+    storage_bucket: str = "lesson-content"
+    supabase_url: str | None = None
+    supabase_service_role_key: str | None = None
+
+    # AI models: "stub" (deterministic, local/tests) or "anthropic" (Claude via the Messages API).
+    ai_provider: str = "stub"
+    anthropic_api_key: str | None = None
+    anthropic_base_url: str = "https://api.anthropic.com"
+    # Required when ai_provider=anthropic: set the exact Claude model id you have access to.
+    ai_model: str | None = None
+    ai_timeout_seconds: float = 60.0
+
     environment: str = "local"
     log_level: str = "INFO"
 

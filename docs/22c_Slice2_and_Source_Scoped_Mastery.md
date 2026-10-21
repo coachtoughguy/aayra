@@ -20,9 +20,9 @@ Companion to **22 Aayra API & Event Contract v1.2** and **22b (v1.3 changes)**. 
 - **Seed values:** `assignment_source_policies` holds the defaults above. They were previously seeded with PARENT/SELF unable to create mastery evidence or schedule reviews; migration 022 updates them.
 - **Frozen scope:** every `evidence_events` row stores `source_scope`, `mastery_eligible` and `review_eligible`, all computed once when it is written. A later policy change never reinterprets old evidence.
 - **Separate mastery rows:** `student_concept_mastery` is unique per (student, concept, lesson, `mastery_scope`). MasteryEngine reads only evidence from the same scope, so a parent lesson on "Photosynthesis" can never move school mastery for the same concepts.
-- **Not yet built:** creating parent or self assignments (the API inventory in contract §9). The policy, scoping and reviews are already enforced and tested for them.
+- **Creating parent/self assignments:** built in the next increment, see `docs/22d_Feedback_Submissions_Family_Learning_and_Real_AI.md`.
 
-## 2. Migration 022 (PENDING on Supabase until approved)
+## 2. Migration 022 (applied to Supabase 2026-10-20, version 20261021050125)
 
 `022_source_scoped_mastery_and_review_mode`:
 1. Upserts `assignment_source_policies` to the values above.

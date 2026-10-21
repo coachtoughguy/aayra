@@ -819,3 +819,75 @@ async def create_student(
         return 201, data
 
     return await run_idempotent(request, actor, body, handler, op_class=OpClass.DEFAULT, school_id=school_id)
+
+
+# ------------------------------------------------------------------------------------------------
+# Guardian link (minimal; full guardian management is a later Admin pass)
+# ------------------------------------------------------------------------------------------------
+class GuardianIn(BaseModel):
+    email: EmailStr
+    display_name: str = Field(min_length=1, max_length=200)
+    phone: str | None = Field(default=None, max_length=30)
+    relationship_type: Literal["MOTHER", "FATHER", "LEGAL_GUARDIAN", "OTHER"]
+    guardian_priority: Literal["PRIMARY", "SECONDARY", "TERTIARY"] = "PRIMARY"
+
+
+@router.post("/students/{student_id}/guardians", status_code=201)
+async def link_guardian(
+    student_id: UUID,
+    body: GuardianIn,
+    request: Request,
+    actor: Actor = Depends(current_actor),
+    ctx: RequestContext = Depends(get_context),
+) -> JSONResponse:
+    async with get_db().connect() as conn:
+        student = await _school_of(
+            conn,
+            "SELECT school_id FROM student_profiles WHERE student_id = :student_id",
+            "student",
+            student_id=student_id,
+        )
+    school_id = student["school_id"]
+    _require_admin(actor, request, school_id)
+
+    async def handler(conn: AsyncConnection):
+        user_id = await _create_user(conn, email=body.email, display_name=body.display_name, phone=body.phone)
+        guardian = await fetch_one(conn, "SELECT guardian_id FROM guardian_profiles WHERE user_id = :u", u=user_id)
+        if guardian is None:
+            guardian = await fetch_one(
+                conn, "INSERT INTO guardian_profiles (user_id) VALUES (:u) RETURNING guardian_id", u=user_id
+            )
+        try:
+            async with conn.begin_nested():
+                link = await fetch_one(
+                    conn,
+                    """INSERT INTO student_guardians (school_id, student_id, guardian_id, relationship_type,
+                                                      guardian_priority, linked_at, linked_by)
+                       VALUES (:s, :st, :g, :rel, :pri, now(), :by) RETURNING student_guardian_id""",
+                    s=school_id,
+                    st=student_id,
+                    g=guardian["guardian_id"],
+                    rel=body.relationship_type,
+                    pri=body.guardian_priority,
+                    by=actor.user_id,
+                )
+        except IntegrityError as exc:
+            if constraint_name(exc) == "student_guardians_student_id_guardian_id_key":
+                raise _conflict("GUARDIAN_ALREADY_LINKED", "This guardian is already linked to the student.") from exc
+            raise
+        await _grant_role(conn, school_id, user_id, "PARENT_GUARDIAN", actor.user_id)
+        await _record_invite(conn, user_id, invited_by=actor.user_id)
+        data = {"student_guardian_id": link["student_guardian_id"], "guardian_id": guardian["guardian_id"],
+                "user_id": user_id, "student_id": student_id, "relationship_type": body.relationship_type,
+                "guardian_priority": body.guardian_priority}  # fmt: skip
+        await audit.record(
+            conn, ctx, action="GUARDIAN_LINKED", entity_type="student_guardian", entity_id=link["student_guardian_id"],
+            school_id=school_id, actor_user_id=actor.user_id, actor_role="SCHOOL_ADMIN", after=data,
+        )  # fmt: skip
+        await emit(
+            conn, ctx, event_type="GuardianLinked", aggregate_type="student_guardian",
+            aggregate_id=link["student_guardian_id"], school_id=school_id, data=data,
+        )  # fmt: skip
+        return 201, data
+
+    return await run_idempotent(request, actor, body, handler, school_id=school_id)

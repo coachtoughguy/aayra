@@ -79,6 +79,13 @@ async def load_lesson_for_teacher(
     )
     if lesson is None:
         raise errors.not_found("lesson", lesson_id=str(lesson_id))
+    family = await fetch_one(
+        conn,
+        "SELECT 1 AS x FROM assignments WHERE lesson_id = :l AND source_type IN ('PARENT', 'SELF') LIMIT 1",
+        l=lesson_id,
+    )
+    if family:  # parent/self learning is private to the family/student, never a teacher's lesson
+        raise errors.not_found("lesson", lesson_id=str(lesson_id))
     teacher = await require_subject_authority(conn, actor, lesson["subject_id"], lesson["academic_year_id"])
     if teacher.school_id != lesson["school_id"]:
         raise errors.insufficient_role_scope()

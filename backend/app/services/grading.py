@@ -75,6 +75,8 @@ async def run_grading_job(db: Database, job: dict[str, Any]) -> None:
                 conn, "UPDATE background_jobs SET status = 'FAILED', last_error = :e WHERE job_id = :j",
                 e=f"grading unavailable after {job['attempt_count']} attempts: {exc}", j=job["job_id"],
             )  # fmt: skip
+            if attempt["status"] == "AWAITING_EVALUATION":
+                await advance(conn, ctx, attempt["attempt_id"])  # parent/self: finish without this answer
             return
         await _log(conn, school_id=lesson["school_id"], student_id=attempt["student_id"],
                    response_id=response["response_id"], latency_ms=int((time.perf_counter() - started) * 1000),

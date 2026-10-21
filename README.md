@@ -24,14 +24,18 @@ AI-powered Learning OS. Product and technical design live in the claude.ai **aay
   - [x] §14 Slice 1 golden path + failure injections green
   - [x] Migration 021 (questions ↔ generation link + answer_spec) applied to Supabase
   - [x] v1.3: publish a published lesson to more sections; retry / remove a failed file
-  - [ ] Real AI model behind `ContentAI`, real Supabase Storage behind `StorageGateway`
+  - [x] Real AI model behind `ContentAI` / `GradingAI` (Claude), real Supabase Storage behind `StorageGateway` — opt-in via env, see `docs/22d_*`
 - [x] **Slice 2** — learning → mastery → spaced review (§7), see `docs/22c_*`
   - [x] focus cycles, finish, prerequisites; mastery check with hint → retry → explanation → verification
   - [x] async free-text grading (TX1/TX2), MasteryEngine, teacher review queue (confirm/adjust)
   - [x] fixed-cadence spaced review on the shared pipeline; reviews on Student Home
   - [x] parent/self learning: scoped mastery, opt-in spaced review (Oct 5 decision)
-  - [ ] Apply pending migration 022 to Supabase
-  - [ ] Teacher feedback draft/publish; deliverable submissions
+  - [x] Migration 022 applied to Supabase (2026-10-20)
+- [x] **Extensions** — see `docs/22d_*`
+  - [x] Teacher feedback: AI draft → teacher edit → publish → student notification
+  - [x] Deliverable submissions (SUBMISSION_REQUIRED / BOTH), late labelling, resubmission history, teacher queue
+  - [x] Parent and self assignments (create → prepare → preview → assign); guardian linking
+  - [ ] Video/audio/YouTube transcription, Word conversion, marks on submissions, school-less self-learners
 
 ## Demo data
 

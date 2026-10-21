@@ -94,7 +94,23 @@ async def open_question(conn: AsyncConnection, attempt_id: UUID) -> tuple[dict[s
 
 
 async def pending_count(conn: AsyncConnection, attempt_id: UUID) -> int:
-    return sum(1 for r in await _responses(conn, attempt_id) if r["evaluation"] is None)
+    """Answers still awaiting an evaluation. For parent/self work there is no teacher to fall back on,
+    so an answer whose grading permanently failed is left ungraded instead of blocking forever."""
+    row = await fetch_one(
+        conn,
+        """SELECT count(*) AS n FROM assessment_responses r
+            WHERE r.assessment_attempt_id = :a
+              AND NOT EXISTS (SELECT 1 FROM response_evaluations re WHERE re.response_id = r.response_id AND re.is_current)
+              AND NOT EXISTS (
+                SELECT 1 FROM background_jobs j
+                  JOIN assessment_attempts at ON at.attempt_id = r.assessment_attempt_id
+                  JOIN student_assignments sa ON sa.student_assignment_id = at.student_assignment_id
+                  JOIN assignments a ON a.assignment_id = sa.assignment_id
+                 WHERE j.job_type = 'RESPONSE_GRADING' AND j.entity_id = r.response_id AND j.status = 'FAILED'
+                   AND a.source_type <> 'SCHOOL')""",
+        a=attempt_id,
+    )
+    return row["n"]
 
 
 # ------------------------------------------------------------------------------------------------
@@ -260,30 +276,14 @@ async def complete_attempt(conn: AsyncConnection, ctx: RequestContext, attempt: 
         await _complete_review(conn, ctx, attempt, stop_reason, lesson["school_id"])
         return
 
-    sa = await fetch_one(
-        conn,
-        """SELECT sa.*, a.completion_mode, a.due_at FROM student_assignments sa
-             JOIN assignments a USING (assignment_id) WHERE sa.student_assignment_id = :sa FOR UPDATE""",
-        sa=attempt["student_assignment_id"],
-    )
     await execute(
         conn,
         """UPDATE student_lesson_progress SET status = 'COMPLETED', last_activity_at = now()
             WHERE student_assignment_id = :sa""",
         sa=attempt["student_assignment_id"],
     )
-    if sa and sa["completion_mode"] == "LEARNING_COMPLETION":
-        due = sa["effective_due_at"] or sa["due_at"]
-        late = due is not None and datetime.now(UTC) > due
-        await execute(
-            conn,
-            """UPDATE student_assignments SET status = :st, completed_at = now(), is_late = :late,
-                      version = version + 1
-                WHERE student_assignment_id = :sa""",
-            st="SUBMITTED_LATE" if late else "COMPLETED",
-            late=late,
-            sa=sa["student_assignment_id"],
-        )
+    if attempt["student_assignment_id"]:
+        await maybe_complete_assignment(conn, attempt["student_assignment_id"])
     # Seed spaced review: Day 2 for every concept whose evidence here was review-eligible (§7.4).
     today, year_end = await _school_today(conn, attempt["lesson_id"])
     eligible = await fetch_all(
@@ -332,6 +332,53 @@ async def complete_attempt(conn: AsyncConnection, ctx: RequestContext, attempt: 
             "reviews_seeded": len(eligible),
         },  # fmt: skip
     )
+
+
+async def maybe_complete_assignment(conn: AsyncConnection, student_assignment_id: UUID) -> str | None:
+    """Mark the student's assignment done once its completion_mode is satisfied (contract §7.4):
+    LEARNING_COMPLETION -> mastery check done; SUBMISSION_REQUIRED -> a submission exists;
+    BOTH -> both. Late work is labelled SUBMITTED_LATE (doc 21: late allowed, never auto-penalised)."""
+    sa = await fetch_one(
+        conn,
+        """SELECT sa.*, a.completion_mode, a.due_at FROM student_assignments sa
+             JOIN assignments a USING (assignment_id) WHERE sa.student_assignment_id = :sa FOR UPDATE OF sa""",
+        sa=student_assignment_id,
+    )
+    if sa is None or sa["status"] in ("COMPLETED", "SUBMITTED", "SUBMITTED_LATE"):
+        return None
+    checked = await fetch_one(
+        conn,
+        """SELECT 1 AS x FROM assessment_attempts WHERE student_assignment_id = :sa AND review_session_id IS NULL
+              AND status = 'COMPLETED' LIMIT 1""",
+        sa=student_assignment_id,
+    )
+    submitted = await fetch_one(
+        conn,
+        "SELECT 1 AS x FROM assignment_submissions WHERE student_assignment_id = :sa LIMIT 1",
+        sa=student_assignment_id,
+    )
+    mode = sa["completion_mode"]
+    done = (
+        (mode == "LEARNING_COMPLETION" and checked)
+        or (mode == "SUBMISSION_REQUIRED" and submitted)
+        or (mode == "BOTH" and checked and submitted)
+    )
+    if not done:
+        return None
+    due = sa["effective_due_at"] or sa["due_at"]
+    late = due is not None and datetime.now(UTC) > due
+    status = "SUBMITTED_LATE" if late else ("SUBMITTED" if mode == "SUBMISSION_REQUIRED" else "COMPLETED")
+    await execute(
+        conn,
+        """UPDATE student_assignments SET status = :st, completed_at = now(), submitted_at = CASE WHEN :sub THEN now()
+                  ELSE submitted_at END, is_late = :late, version = version + 1
+            WHERE student_assignment_id = :sa""",
+        st=status,
+        sub=bool(submitted),
+        late=late,
+        sa=student_assignment_id,
+    )
+    return status
 
 
 async def _complete_review(
@@ -551,10 +598,13 @@ async def responsible_teacher(conn: AsyncConnection, attempt: dict[str, Any]) ->
 async def queue_teacher_review(
     conn: AsyncConnection, ctx: RequestContext, attempt: dict[str, Any], *, response_evaluation_id: UUID | None,
     reason: str, snapshot: dict[str, Any],
-) -> None:  # fmt: skip
+) -> bool:  # fmt: skip
+    """School work only: parent/self learning never lands in a teacher's queue."""
+    if (await eligibility_for(conn, attempt["student_assignment_id"])).scope != "SCHOOL":
+        return False
     teacher_id = await responsible_teacher(conn, attempt)
     if teacher_id is None:
-        return
+        return False
     lesson = await fetch_one(conn, "SELECT school_id FROM lessons WHERE lesson_id = :l", l=attempt["lesson_id"])
     sa = await fetch_one(
         conn, "SELECT assignment_id FROM student_assignments WHERE student_assignment_id = :sa",
@@ -582,3 +632,4 @@ async def queue_teacher_review(
         school_id=lesson["school_id"],
         data={"teacher_id": teacher_id, "student_id": attempt["student_id"], "reason": reason},
     )
+    return True

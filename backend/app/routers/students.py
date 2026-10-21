@@ -21,6 +21,8 @@ from app.routers.assessments import review_items
 router = APIRouter(prefix="/v1/students/me", tags=["student"])
 
 DONE = ("COMPLETED", "SUBMITTED", "SUBMITTED_LATE")
+# doc 21 v1.0: recommendation priority School > Parent > Self (within the same urgency tier)
+SOURCE_RANK = {"SCHOOL": 0, "PARENT": 1, "SELF": 2}
 TIER_ORDER = ["OVERDUE", "DUE_TODAY", "REVIEW_DUE_TODAY", "DUE_TOMORROW", "LATER"]
 
 
@@ -109,15 +111,22 @@ async def home(request: Request, actor: Actor = Depends(current_actor)) -> dict:
 
     far_future = datetime.max.replace(tzinfo=UTC)
     queue = [
-        (TIER_ORDER.index(t := _tier(w["due_at"], now, tz)), w["due_at"] or far_future, w["title"], w, t)
+        (
+            TIER_ORDER.index(t := _tier(w["due_at"], now, tz)),
+            SOURCE_RANK.get(w["source"], 9),
+            w["due_at"] or far_future,
+            w["title"],
+            w,
+            t,
+        )
         for w in pending
         if not continue_learning or w["student_assignment_id"] != continue_learning["student_assignment_id"]
     ]
     # Due/overdue spaced reviews sit in the REVIEW_DUE_TODAY tier (doc 21 v0.7 What's Next order).
     for r in reviews:
         due = datetime.combine(r["scheduled_for"], datetime.min.time(), tzinfo=tz)
-        queue.append((TIER_ORDER.index("REVIEW_DUE_TODAY"), due, r["concept_name"], r, "REVIEW_DUE_TODAY"))
-    queue.sort(key=lambda q: q[:3])
+        queue.append((TIER_ORDER.index("REVIEW_DUE_TODAY"), 0, due, r["concept_name"], r, "REVIEW_DUE_TODAY"))
+    queue.sort(key=lambda q: q[:4])
     week_start = (now.astimezone(tz) - timedelta(days=now.astimezone(tz).weekday())).replace(
         hour=0, minute=0, second=0, microsecond=0
     )

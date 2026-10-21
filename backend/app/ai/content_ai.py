@@ -142,7 +142,14 @@ _ai: ContentAI | None = None
 def get_content_ai() -> ContentAI:
     global _ai
     if _ai is None:
-        _ai = StubContentAI()
+        from app.config import get_settings
+
+        if get_settings().ai_provider == "anthropic":
+            from app.ai.anthropic import ClaudeContentAI
+
+            _ai = ClaudeContentAI()
+        else:
+            _ai = StubContentAI()
     return _ai
 
 

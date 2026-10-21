@@ -43,8 +43,9 @@ async def _load_item(conn: AsyncConnection, actor: Actor, review_item_id: UUID, 
         raise errors.not_found("teacher_review_item", review_item_id=str(review_item_id))
     lesson = await fetch_one(
         conn,
-        "SELECT l.subject_id, l.academic_year_id FROM assessment_attempts a JOIN lessons l USING (lesson_id) WHERE a.attempt_id = :a",
-        a=item["attempt_id"],
+        """SELECT l.subject_id, l.academic_year_id FROM assignments a JOIN lessons l USING (lesson_id)
+            WHERE a.assignment_id = :a""",
+        a=item["assignment_id"],
     )
     await require_subject_authority(conn, actor, lesson["subject_id"], lesson["academic_year_id"])
     return item
@@ -58,7 +59,7 @@ async def list_review_items(request: Request, status: str = "PENDING", actor: Ac
             conn,
             """SELECT i.review_item_id, i.reason_type, i.status, i.created_at, i.ai_evaluation_snapshot,
                       u.display_name AS student_name, i.student_id, a.title AS assignment_title, q.prompt_text,
-                      q.question_type
+                      q.question_type, i.submission_id
                  FROM teacher_review_items i
                  JOIN student_profiles sp ON sp.student_id = i.student_id JOIN users u ON u.user_id = sp.user_id
                  LEFT JOIN assignments a ON a.assignment_id = i.assignment_id
@@ -84,8 +85,9 @@ async def confirm(
             raise errors.AppError(
                 "REVIEW_ITEM_CLOSED", 409, "This item was already handled.", {"status": item["status"]}
             )
-        if item["response_evaluation_id"] is None:
+        if item["response_evaluation_id"] is None and item["submission_id"] is None:
             raise errors.AppError("NOTHING_TO_CONFIRM", 409, "There is no AI evaluation to confirm; adjust instead.")
+        # For a submission item, confirm = "reviewed" (marks are optional and not modelled yet).
         await execute(
             conn, "UPDATE teacher_review_items SET status = 'CONFIRMED', reviewed_at = now() WHERE review_item_id = :i",
             i=review_item_id,
@@ -113,6 +115,8 @@ async def adjust(
             raise errors.AppError(
                 "REVIEW_ITEM_CLOSED", 409, "This item was already handled.", {"status": item["status"]}
             )
+        if item["attempt_id"] is None:
+            raise errors.AppError("NOTHING_TO_ADJUST", 409, "Submissions are reviewed with confirm and feedback.")
         attempt = await svc.load_attempt(conn, item["attempt_id"], lock=True)
         question = await fetch_one(conn, "SELECT * FROM questions WHERE question_id = :q", q=item["question_id"])
         result = await finalize_evaluation(
