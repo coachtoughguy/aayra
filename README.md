@@ -39,7 +39,7 @@ AI-powered Learning OS. Product and technical design live in the claude.ai **aay
   - [x] Marks on submissions (optional, teacher-only or student-visible, released by the teacher)
   - [x] Parents/students can change files until the work is assigned
   - [x] Independent 18+ self-learners (private personal space)
-  - [ ] Apply pending migration 023 to Supabase
+  - [x] Migration 023 applied to Supabase (2026-10-26)
 
 ## Demo data
 

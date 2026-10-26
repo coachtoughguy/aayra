@@ -1,7 +1,7 @@
 # 22e — Video/Audio, YouTube, Word Documents, Marks and Independent Learners
 
 Status: built and tested (111 tests green), 2026-10-20. Builds on 22d.
-Migration **023 is PENDING**: it is written and tested locally, and checked against the live schema, but not yet applied to Supabase.
+Migration 023 is **applied** to Supabase (2026-10-26, version `20261026020324`).
 
 ## Decisions taken (Oct 20, Vinay)
 
@@ -76,7 +76,7 @@ Details:
 - **`GET /v1/students/me/subjects`** (any student): lists the subjects to choose from when creating self-learning.
 - **Everything else** uses the existing self-learning endpoints unchanged. Mastery is `SELF`-scoped and spaced review is opt-in. There are no teachers or guardians in a personal space, and nobody from a school can see into it.
 
-## 5. Migration 023 (`023_marks_and_independent_learners`, PENDING)
+## 5. Migration 023 (`023_marks_and_independent_learners`, applied 2026-10-26)
 
 1. Adds `assignments.max_marks` and `marks_visibility`, with checks (positive marks; marks only on submission modes).
 2. Adds `assignment_submissions.marks_awarded`, `marked_by`, `marked_at` and `marks_released_at`, with checks.

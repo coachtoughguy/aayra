@@ -1,5 +1,5 @@
 -- 023_marks_and_independent_learners
--- PENDING: not yet applied to Supabase.
+-- Applied to Supabase project aayra on 2026-10-26 (version 20261026020324), approved by Vinay.
 --
 -- 1. Marks on submissions (doc 12 "Marks, mastery, and ranking policy"):
 --    marks are optional per assignment, and either teacher-only or visible to the student.
