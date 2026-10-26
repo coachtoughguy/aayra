@@ -7,16 +7,31 @@ the version check, the outbox event and the idempotency record commit or roll ba
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
+from uuid import uuid4
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_engine
+from sqlalchemy.pool import NullPool
 
 from app.config import get_settings
 
 
 class Database:
-    def __init__(self, url: str):
-        self.engine: AsyncEngine = create_async_engine(url, pool_pre_ping=True, pool_size=5)
+    def __init__(self, url: str, *, serverless: bool = False):
+        if serverless or ":6543/" in url:
+            # Serverless + Supabase transaction pooler (Supavisor): no client-side pool and no
+            # prepared-statement reuse across pooled server connections.
+            self.engine: AsyncEngine = create_async_engine(
+                url,
+                poolclass=NullPool,
+                connect_args={
+                    "statement_cache_size": 0,
+                    "prepared_statement_cache_size": 0,
+                    "prepared_statement_name_func": lambda: f"__asyncpg_{uuid4().hex}__",
+                },
+            )
+        else:
+            self.engine = create_async_engine(url, pool_pre_ping=True, pool_size=5)
 
     @asynccontextmanager
     async def begin(self) -> AsyncIterator[AsyncConnection]:
@@ -39,7 +54,8 @@ _db: Database | None = None
 def get_db() -> Database:
     global _db
     if _db is None:
-        _db = Database(get_settings().database_url)
+        s = get_settings()
+        _db = Database(s.database_url, serverless=s.db_serverless)
     return _db
 
 

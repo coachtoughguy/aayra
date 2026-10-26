@@ -193,3 +193,84 @@ async def distribution_status(conn: AsyncConnection, assignment_id: UUID) -> dic
         "expected_count": expected,
         "last_error": job["last_error"] if job and status != "COMPLETE" else None,
     }
+
+
+async def backfill_student(
+    conn: AsyncConnection, ctx: Any, *, school_id: UUID, student_id: UUID, section_id: UUID
+) -> dict[str, list]:
+    """Contract §11 / doc 21 (Oct 4 LOCK): a student who becomes ACTIVE in a section receives every
+    SECTION-target assignment there that is SCHEDULED/PUBLISHED/ACTIVE and not yet due, exactly as if
+    enrolled at publish time. Work already past due is NOT auto-assigned: the responsible teacher is
+    notified with the list and decides catch-up. Idempotent (unique per assignment + student)."""
+    rows = await fetch_all(
+        conn,
+        """SELECT a.* FROM assignments a JOIN assignment_targets t USING (assignment_id)
+            WHERE t.target_type = 'SECTION' AND t.section_id = :sec AND a.source_type = 'SCHOOL'
+              AND a.status IN ('SCHEDULED', 'PUBLISHED', 'ACTIVE')""",
+        sec=section_id,
+    )
+    user = await fetch_one(conn, "SELECT user_id FROM student_profiles WHERE student_id = :s", s=student_id)
+    delivered, past_due = [], []
+    from datetime import UTC, datetime
+
+    now = datetime.now(UTC)
+    for a in rows:
+        if a["due_at"] is not None and a["due_at"] <= now:
+            past_due.append(a)
+            continue
+        row = await fetch_one(
+            conn,
+            """INSERT INTO student_assignments (school_id, assignment_id, student_id, effective_due_at)
+               VALUES (:sc, :a, :st, :due) ON CONFLICT (assignment_id, student_id) DO NOTHING
+               RETURNING student_assignment_id""",
+            sc=school_id, a=a["assignment_id"], st=student_id, due=a["due_at"],
+        )  # fmt: skip
+        if row is None:
+            continue
+        await execute(
+            conn,
+            """INSERT INTO student_lesson_progress (student_id, lesson_id, student_assignment_id)
+               VALUES (:st, :l, :sa) ON CONFLICT DO NOTHING""",
+            st=student_id, l=a["lesson_id"], sa=row["student_assignment_id"],
+        )  # fmt: skip
+        if a["status"] != "SCHEDULED":
+            await _notify(
+                conn, a, [{"user_id": user["user_id"], "student_assignment_id": row["student_assignment_id"]}]
+            )
+        delivered.append(a["assignment_id"])
+    if past_due:
+        student = await fetch_one(
+            conn, "SELECT u.display_name FROM student_profiles sp JOIN users u USING (user_id) WHERE sp.student_id = :s",
+            s=student_id,
+        )  # fmt: skip
+        by_teacher: dict[UUID, list[dict]] = {}
+        for a in past_due:
+            t = await fetch_one(
+                conn,
+                """SELECT tp.user_id FROM teacher_section_subject_assignments t JOIN teacher_profiles tp USING (teacher_id)
+                     JOIN lessons l ON l.subject_id = t.subject_id AND l.lesson_id = :l
+                    WHERE t.section_id = :sec AND t.status = 'ACTIVE'
+                      AND t.assignment_role IN ('PRIMARY_SUBJECT_TEACHER', 'CO_TEACHER')
+                    ORDER BY (t.assignment_role = 'PRIMARY_SUBJECT_TEACHER') DESC LIMIT 1""",
+                l=a["lesson_id"], sec=section_id,
+            )  # fmt: skip
+            if t:
+                by_teacher.setdefault(t["user_id"], []).append(a)
+        for teacher_user, items in by_teacher.items():
+            await execute(
+                conn,
+                """INSERT INTO notifications (school_id, recipient_user_id, notification_type, title, body, priority,
+                                              entity_type, entity_id, deep_link)
+                   VALUES (:s, :u, 'LATE_JOINER_CATCH_UP', :t, :b, 'NORMAL', 'student', :st, :link)""",
+                s=school_id, u=teacher_user,
+                t=f"{student['display_name']} joined your class: {len(items)} past-due assignment(s)",
+                b="; ".join(a["title"] for a in items), st=student_id,
+                link=f"aayra://teacher/students/{student_id}",
+            )  # fmt: skip
+    if delivered or past_due:
+        await emit(
+            conn, ctx, event_type="LateEnrollmentBackfilled", aggregate_type="student", aggregate_id=student_id,
+            school_id=school_id,
+            data={"section_id": section_id, "delivered": delivered, "past_due": [a["assignment_id"] for a in past_due]},
+        )  # fmt: skip
+    return {"delivered": delivered, "past_due": [a["assignment_id"] for a in past_due]}

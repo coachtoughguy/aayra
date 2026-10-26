@@ -13,6 +13,7 @@ dependencies = [
   "pyjwt[crypto]>=2.8",
   "email-validator>=2.1",
   "httpx>=0.27",
+  "imageio-ffmpeg>=0.5",
 ]
 
 [dependency-groups]
@@ -41,3 +42,7 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["F811"]  # pytest fixtures imported from another test module
+
+[tool.vercel]
+# Vercel (Python runtime) serves the FastAPI instance `app` from app/main.py as one function.
+entrypoint = "app.main:app"

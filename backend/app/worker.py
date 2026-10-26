@@ -6,6 +6,7 @@ Tests call `await drain(db)` to run everything that is due, deterministically.
 
 import asyncio
 import logging
+import time
 from typing import Any
 
 from app.db import Database, execute, fetch_one, get_db
@@ -98,12 +99,27 @@ async def run_once(db: Database) -> bool:
     return True
 
 
-async def drain(db: Database | None = None, *, max_jobs: int = 10_000) -> int:
+async def drain(db: Database | None = None, *, max_jobs: int = 10_000, time_budget: float | None = None) -> int:
+    """Run due jobs until none are left, `max_jobs` ran, or `time_budget` seconds passed (serverless:
+    stop well before the platform's function time limit; anything left runs on the next tick)."""
     db = db or get_db()
     ran = 0
-    while ran < max_jobs and await run_once(db):
+    deadline = time.monotonic() + time_budget if time_budget else None
+    while ran < max_jobs and (deadline is None or time.monotonic() < deadline) and await run_once(db):
         ran += 1
     return ran
+
+
+async def jobs_waiting(db: Database | None = None) -> int:
+    db = db or get_db()
+    async with db.connect() as conn:
+        row = await fetch_one(
+            conn,
+            """SELECT (SELECT count(*) FROM content_processing_jobs WHERE status IN ('QUEUED', 'RETRYING'))
+                    + (SELECT count(*) FROM background_jobs WHERE status IN ('QUEUED', 'RETRYING')
+                         AND (scheduled_at IS NULL OR scheduled_at <= now())) AS n""",
+        )
+    return int(row["n"])
 
 
 async def main(poll_seconds: float = 1.0) -> None:  # pragma: no cover - process entrypoint

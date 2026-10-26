@@ -1,0 +1,22 @@
+name: worker-tick
+
+# Runs queued background jobs (scheduled releases, processing, grading) on the deployed API every
+# 5 minutes, because Vercel's free plan has no always-on worker and its cron runs once a day.
+# Set repository secrets AAYRA_API_URL (e.g. https://aayra-api.vercel.app) and AAYRA_WORKER_SECRET.
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+jobs:
+  tick:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - name: Run due jobs
+        env:
+          API: ${{ secrets.AAYRA_API_URL }}
+          SECRET: ${{ secrets.AAYRA_WORKER_SECRET }}
+        run: |
+          if [ -z "$API" ] || [ -z "$SECRET" ]; then echo "Secrets not set; skipping."; exit 0; fi
+          curl -fsS -X POST "$API/internal/worker/run" -H "Authorization: Bearer $SECRET" --max-time 290

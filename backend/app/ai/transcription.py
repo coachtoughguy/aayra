@@ -16,6 +16,7 @@ Enable with AAYRA_TRANSCRIPTION_PROVIDER=openai, AAYRA_OPENAI_API_KEY and AAYRA_
 
 import asyncio
 import os
+import re
 import shutil
 import tempfile
 from dataclasses import dataclass, field
@@ -101,16 +102,35 @@ async def _run(*args: str) -> tuple[int, bytes, bytes]:
     return proc.returncode or 0, out, err
 
 
-async def probe_duration(path: str) -> float | None:
-    if not shutil.which("ffprobe"):
-        return None
-    code, out, _ = await _run(
-        "ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=nw=1:nk=1", path
-    )
+def ffmpeg_path() -> str | None:
+    """System ffmpeg, else the static build shipped in the imageio-ffmpeg wheel (serverless hosts
+    such as Vercel have no system ffmpeg)."""
+    found = shutil.which("ffmpeg")
+    if found:
+        return found
     try:
-        return float(out.strip()) if code == 0 else None
-    except ValueError:
+        import imageio_ffmpeg
+
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:  # not installed / no binary for this platform
         return None
+
+
+_DURATION = re.compile(rb"Duration:\s*(\d+):(\d{2}):(\d{2}(?:\.\d+)?)")
+
+
+async def probe_duration(path: str, ffmpeg: str) -> float | None:
+    if shutil.which("ffprobe"):
+        code, out, _ = await _run(
+            "ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=nw=1:nk=1", path
+        )
+        try:
+            return float(out.strip()) if code == 0 else None
+        except ValueError:
+            return None
+    _, _, err = await _run(ffmpeg, "-hide_banner", "-i", path)  # prints the header, then exits non-zero
+    m = _DURATION.search(err)
+    return int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3)) if m else None
 
 
 async def prepare_audio(
@@ -118,7 +138,8 @@ async def prepare_audio(
 ) -> tuple[list[AudioPiece], float | None]:
     """Turn uploaded media into API-sized audio pieces with known start offsets."""
     ext = _extension(mime_type)
-    if not shutil.which("ffmpeg"):
+    ffmpeg = ffmpeg_path()
+    if not ffmpeg:
         if len(data) <= API_LIMIT_BYTES and ext in ACCEPTED_EXTENSIONS:
             return [AudioPiece(data, f"media{ext}", 0.0)], None
         raise ContentExtractionError(
@@ -128,14 +149,14 @@ async def prepare_audio(
     with tempfile.TemporaryDirectory(prefix="aayra-media-") as tmp:
         src = os.path.join(tmp, f"source{ext}")
         await asyncio.to_thread(Path(src).write_bytes, data)
-        duration = await probe_duration(src)
+        duration = await probe_duration(src, ffmpeg)
         if duration is not None and duration > max_seconds:
             raise ContentExtractionError(
                 "MEDIA_TOO_LONG", f"Media is {duration / 3600:.1f} h long; the limit is {max_seconds / 3600:.1f} h."
             )
         pattern = os.path.join(tmp, "piece%04d.mp3")
         code, _, err = await _run(
-            "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-i", src, "-vn", "-ac", "1", "-ar", "16000",
+            ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error", "-i", src, "-vn", "-ac", "1", "-ar", "16000",
             "-b:a", "32k", "-f", "segment", "-segment_time", str(PIECE_SECONDS), "-reset_timestamps", "1", pattern,
         )  # fmt: skip
         pieces = sorted(p for p in os.listdir(tmp) if p.startswith("piece"))

@@ -38,16 +38,38 @@ class Actor:
         return [s for s, r in self.roles.items() if r & set(role_codes)]
 
 
+_jwks_client: "jwt.PyJWKClient | None" = None
+
+
+def _jwks() -> "jwt.PyJWKClient":
+    global _jwks_client
+    s = get_settings()
+    if not s.supabase_url:
+        raise errors.unauthenticated("This token type needs AAYRA_SUPABASE_URL to be configured.")
+    if _jwks_client is None:
+        _jwks_client = jwt.PyJWKClient(
+            f"{s.supabase_url.rstrip('/')}/auth/v1/.well-known/jwks.json", cache_keys=True, lifespan=3600
+        )
+    return _jwks_client
+
+
 def decode_token(token: str) -> dict:
+    """Verify a Supabase access token: HS256 with the project's JWT secret, or ES256/RS256 with the
+    project's published signing keys (JWKS)."""
     s = get_settings()
     try:
-        return jwt.decode(
-            token,
-            s.jwt_secret,
-            algorithms=list(s.jwt_algorithms),
-            audience=s.jwt_audience,
-            options={"require": ["sub", "exp"]},
-        )
+        alg = jwt.get_unverified_header(token).get("alg", "")
+        if alg not in s.jwt_algorithms:
+            raise errors.unauthenticated("Unsupported token algorithm.")
+        if alg.startswith("HS"):
+            if not s.jwt_secret:
+                raise errors.unauthenticated("Shared-secret tokens are disabled.")
+            key = s.jwt_secret
+        else:
+            key = _jwks().get_signing_key_from_jwt(token).key
+        options = {"require": ["sub", "exp"]}
+        issuer = f"{s.supabase_url.rstrip('/')}/auth/v1" if s.supabase_url and not alg.startswith("HS") else None
+        return jwt.decode(token, key, algorithms=[alg], audience=s.jwt_audience, issuer=issuer, options=options)
     except jwt.PyJWTError as exc:
         raise errors.unauthenticated(f"Invalid access token: {exc.__class__.__name__}.") from exc
 
@@ -59,7 +81,9 @@ async def load_actor(conn: AsyncConnection, user_id: UUID) -> Actor:
         u=user_id,
     )
     if user is None:
-        raise errors.unauthenticated("No Aayra account for this identity.")
+        # A valid login with no Aayra account yet: the app offers independent signup (18+) or tells
+        # the person to use their school's invite.
+        raise errors.AppError("NO_ACCOUNT", 401, "No Aayra account for this login yet.")
     if user["account_status"] == "INVITED":
         # A valid Supabase token for an invited user proves they accepted the invite and set
         # credentials: activate on first authenticated request.

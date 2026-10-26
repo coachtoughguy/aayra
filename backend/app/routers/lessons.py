@@ -314,13 +314,23 @@ async def get_lesson(lesson_id: UUID, request: Request, actor: Actor = Depends(c
             )
             questions = await fetch_all(
                 conn,
-                """SELECT question_id, concept_id, question_type, cognitive_type, prompt_text, difficulty, answer_spec
+                """SELECT question_id, concept_id, question_type, cognitive_type, prompt_text, difficulty, answer_spec,
+                          CASE WHEN generated_by_model = 'teacher' THEN 'TEACHER'
+                               WHEN (source_provenance ->> 'edited_by_teacher') = 'true' THEN 'EDITED'
+                               ELSE 'AI' END AS source
                      FROM questions WHERE blueprint_id = :b ORDER BY created_at, question_id""",
+                b=gen["blueprint_id"],
+            )
+            run = await fetch_one(
+                conn,
+                """SELECT r.run_type FROM assessment_blueprints b JOIN ai_generation_runs r USING (generation_run_id)
+                    WHERE b.blueprint_id = :b""",
                 b=gen["blueprint_id"],
             )
             generation = {
                 "generation_version": gen["version"],
                 "generated_at": gen["generated_at"],
+                "edited_by_teacher": run is not None and run["run_type"] == "TEACHER_EDIT",
                 "concepts": concepts,
                 "questions": questions,
             }

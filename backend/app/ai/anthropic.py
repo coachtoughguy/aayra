@@ -423,3 +423,66 @@ class ClaudeGradingAI:
             max_tokens=400,
         )
         return out["text"].strip()
+
+
+# ------------------------------------------------------------------------------------------------
+# In-lesson tutor
+# ------------------------------------------------------------------------------------------------
+TUTOR_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "reply": {"type": "string"},
+        "on_topic": {"type": "boolean"},
+        "used_chunk_indexes": {"type": "array", "items": {"type": "integer"}},
+    },
+    "required": ["reply", "on_topic", "used_chunk_indexes"],
+}
+
+
+class ClaudeTutorAI:
+    prompt_version = PROMPT_VERSION
+
+    def __init__(self, client: ClaudeClient | None = None):
+        self._client = client
+
+    @property
+    def client(self) -> ClaudeClient:
+        return self._client or get_client()
+
+    @property
+    def model_name(self) -> str:
+        return self.client.model
+
+    async def reply(self, context: dict[str, Any]) -> Any:
+        from app.ai.tutor_ai import MODES, OFF_TOPIC, TutorReply, TutorUnavailable
+
+        material = "\n".join(f"[{i}] {c}" for i, c in enumerate(context["chunks"]))
+        history = "\n".join(f"{m['role']}: {m['content']}" for m in context.get("history", []))
+        try:
+            out, usage = await self.client.call_tool(
+                system=(
+                    "You are a friendly, patient tutor inside a learning app for students aged 13 and older. "
+                    "Help ONLY with the lesson below, using its material; if something isn't covered, say so briefly "
+                    "and stay on the lesson. If the request is unrelated to the lesson or its subject, or unsafe, set "
+                    "on_topic=false and gently steer back. Never write graded work for the student or reveal answers "
+                    "to assessment questions; coach their thinking instead. Keep replies short (under 120 words), "
+                    "clear and encouraging, with no rankings or comparisons with other students. "
+                    f"{DATA_RULE} The student's messages are inside <student_answer> tags."
+                ),
+                content=(
+                    f"Lesson: {context['lesson_title']} (subject: {context.get('subject_name', '')})\n"
+                    f"Topics: {', '.join(context.get('concepts', []))}\n<material>\n{material}\n</material>\n"
+                    f"Conversation so far:\n<student_answer>{history}</student_answer>\n"
+                    f"Task: {MODES[context['mode']]}\n<student_answer>{context['message']}</student_answer>"
+                ),
+                tool_name="record_tutor_reply",
+                description="Record the tutor's reply.",
+                schema=TUTOR_SCHEMA,
+                max_tokens=700,
+            )
+        except (ProviderUnavailable, ProviderError) as exc:
+            raise TutorUnavailable(str(exc)) from exc
+        on_topic = bool(out.get("on_topic", True))
+        text = (out.get("reply") or "").strip() or OFF_TOPIC
+        used = [i for i in out.get("used_chunk_indexes", []) if isinstance(i, int) and 0 <= i < len(context["chunks"])]
+        return TutorReply(text[:2000], off_topic=not on_topic, used_chunks=used, usage=usage)

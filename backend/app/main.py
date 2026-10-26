@@ -4,6 +4,7 @@ import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import get_settings
 from app.context import install_context
@@ -11,6 +12,7 @@ from app.db import get_db
 from app.errors import install_error_handlers
 from app.routers import (
     admin_bootstrap,
+    admin_ops,
     assessments,
     content,
     family_learning,
@@ -18,10 +20,15 @@ from app.routers import (
     health,
     independent,
     learning,
+    lesson_editing,
     lessons,
+    ops,
+    progress,
     students,
     submissions,
     teacher_review,
+    tutor,
+    views,
 )
 
 
@@ -41,10 +48,22 @@ def create_app() -> FastAPI:
     )
     install_error_handlers(app)
     install_context(app)
+    origins = [o.strip().rstrip("/") for o in get_settings().cors_origins.split(",") if o.strip()]
+    if origins:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=origins,
+            allow_methods=["*"],
+            allow_headers=["*"],
+            expose_headers=["X-Request-Id", "X-Correlation-Id", "Idempotent-Replayed"],
+            max_age=600,
+        )
     app.include_router(health.router)
     app.include_router(admin_bootstrap.router)
+    app.include_router(admin_ops.router)
     app.include_router(content.router)
     app.include_router(lessons.router)
+    app.include_router(lesson_editing.router)
     app.include_router(students.router)
     app.include_router(learning.router)
     app.include_router(assessments.router)
@@ -53,6 +72,10 @@ def create_app() -> FastAPI:
     app.include_router(feedback.router)
     app.include_router(family_learning.router)
     app.include_router(independent.router)
+    app.include_router(ops.router)
+    app.include_router(progress.router)
+    app.include_router(tutor.router)
+    app.include_router(views.router)
     return app
 
 

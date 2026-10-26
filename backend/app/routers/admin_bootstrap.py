@@ -22,8 +22,9 @@ from app.config import get_settings
 from app.context import RequestContext, get_context
 from app.db import constraint_name, execute, fetch_one, get_db
 from app.idempotency import OpClass, run_idempotent
-from app.identity import LoginRequest, get_identity_provider
+from app.identity import LoginRequest, ProvisionedLogin, get_identity_provider
 from app.outbox import emit
+from app.services.distribution import backfill_student
 
 router = APIRouter(prefix="/v1", tags=["admin-bootstrap"])
 
@@ -75,14 +76,15 @@ async def _create_user(
     phone: str | None = None,
     date_of_birth: date | None = None,
     username: str | None = None,
-) -> UUID:
+) -> ProvisionedLogin:
     if email:
         existing = await fetch_one(conn, "SELECT user_id FROM users WHERE email = :e", e=email)
         if existing:  # one person, one account, many roles (doc 02)
-            return existing["user_id"]
-    user_id = await get_identity_provider().provision_login(
+            return ProvisionedLogin(existing["user_id"], None, email)
+    login = await get_identity_provider().provision_login(
         LoginRequest(display_name=display_name, email=email, username=username)
     )
+    user_id = login.user_id
     await execute(
         conn,
         """INSERT INTO users (user_id, email, phone, display_name, date_of_birth, age_gate_status,
@@ -95,7 +97,7 @@ async def _create_user(
         dob=date_of_birth,
         age="verified_13_plus" if date_of_birth else "not_applicable",
     )
-    return user_id
+    return login
 
 
 async def _grant_role(conn: AsyncConnection, school_id: UUID, user_id: UUID, role: str, by: UUID | None) -> None:
@@ -176,7 +178,7 @@ async def create_school(
                 cc=body.country_code,
             )
             school_id = school["school_id"]
-            admin_id = await _create_user(conn, email=body.admin.email, display_name=body.admin.display_name)
+            admin_id = (await _create_user(conn, email=body.admin.email, display_name=body.admin.display_name)).user_id
             await _grant_role(conn, school_id, admin_id, "SCHOOL_ADMIN", None)
             await _record_invite(conn, admin_id, invited_by=admin_id)  # platform-invited; self as inviter
             data = {
@@ -499,7 +501,7 @@ async def invite_teacher(
     _require_admin(actor, request, body.school_id)
 
     async def handler(conn: AsyncConnection):
-        user_id = await _create_user(conn, email=body.email, display_name=body.display_name, phone=body.phone)
+        user_id = (await _create_user(conn, email=body.email, display_name=body.display_name, phone=body.phone)).user_id
         existing = await fetch_one(conn, "SELECT teacher_id FROM teacher_profiles WHERE user_id = :u", u=user_id)
         if existing:
             raise _conflict(
@@ -687,6 +689,118 @@ class StudentIn(BaseModel):
     enrollment_date: date | None = None
 
 
+async def enroll_student(
+    conn: AsyncConnection, ctx: RequestContext, actor: Actor, section: dict, body: "StudentIn"
+) -> dict:
+    """Create the login, profile, STUDENT role and ACTIVE enrollment (shared by single add and bulk import).
+    `section` = {school_id, grade_id, academic_year_id, school_code}."""
+    school_id = section["school_id"]
+    enrollment_date = body.enrollment_date or date.today()
+    dup = await fetch_one(
+        conn,
+        "SELECT student_id FROM student_profiles WHERE school_id = :s AND admission_id = :a",
+        s=school_id,
+        a=body.admission_id,
+    )
+    if dup:
+        raise _conflict(
+            "ADMISSION_ID_TAKEN",
+            "A student with this admission id already exists.",
+            student_id=str(dup["student_id"]),
+        )
+    username = (
+        None
+        if body.email
+        else f"{_USERNAME_SAFE.sub('', section['school_code'].lower())}."
+        f"{_USERNAME_SAFE.sub('', body.admission_id.lower())}"
+    )
+    login = await _create_user(
+        conn,
+        email=body.email,
+        display_name=body.display_name,
+        date_of_birth=body.date_of_birth,
+        username=username,
+    )
+    user_id = login.user_id
+    profile = await fetch_one(
+        conn,
+        """INSERT INTO student_profiles (school_id, user_id, admission_id, date_of_birth, preferred_language)
+           VALUES (:s, :u, :a, :dob, :lang) RETURNING student_id""",
+        s=school_id,
+        u=user_id,
+        a=body.admission_id,
+        dob=body.date_of_birth,
+        lang=body.preferred_language,
+    )
+    student_id = profile["student_id"]
+    await _grant_role(conn, school_id, user_id, "STUDENT", actor.user_id)
+    await _record_invite(conn, user_id, invited_by=actor.user_id)
+    enrollment = await fetch_one(
+        conn,
+        """INSERT INTO student_enrollments
+             (school_id, student_id, academic_year_id, grade_id, section_id, enrollment_date, status)
+           VALUES (:s, :st, :y, :g, :sec, :d, 'ACTIVE') RETURNING enrollment_id""",
+        s=school_id,
+        st=student_id,
+        y=section["academic_year_id"],
+        g=section["grade_id"],
+        sec=body.section_id,
+        d=enrollment_date,
+    )
+    data = {
+        "student_id": student_id,
+        "user_id": user_id,
+        "enrollment_id": enrollment["enrollment_id"],
+        "school_id": school_id,
+        "section_id": body.section_id,
+        "academic_year_id": section["academic_year_id"],
+        "display_name": body.display_name,
+        "admission_id": body.admission_id,
+        "username": username,
+        "guardian_status": "PRIMARY_GUARDIAN_PENDING",  # never blocks learning (doc 21 v1.0)
+    }
+    await audit.record(
+        conn,
+        ctx,
+        action="STUDENT_ENROLLED",
+        entity_type="student_profile",
+        entity_id=student_id,
+        school_id=school_id,
+        actor_user_id=actor.user_id,
+        actor_role="SCHOOL_ADMIN",
+        after={k: v for k, v in data.items() if k != "username"},
+    )
+    enrolled_event = await emit(
+        conn,
+        ctx,
+        event_type="StudentCreated",
+        aggregate_type="student",
+        aggregate_id=student_id,
+        school_id=school_id,
+        data=data,
+    )
+    # Contract §5/§9/§11: every path that yields an ACTIVE enrollment emits this, so the
+    # late-enrollment back-fill (§11) fires uniformly.
+    await emit(
+        conn,
+        ctx,
+        event_type="StudentEnrollmentActivated",
+        aggregate_type="student_enrollment",
+        aggregate_id=enrollment["enrollment_id"],
+        school_id=school_id,
+        causation_id=enrolled_event,
+        data={
+            "student_id": student_id,
+            "section_id": body.section_id,
+            "academic_year_id": section["academic_year_id"],
+            "effective_at": enrollment_date,
+        },
+    )
+    await backfill_student(conn, ctx, school_id=school_id, student_id=student_id, section_id=body.section_id)
+    # Shown once to the admin for a username login (never in audit/events). Lost? Use reset-login.
+    return {**data, "temporary_password": login.temporary_password}
+
+
 @router.post("/students", status_code=201)
 async def create_student(
     body: StudentIn,
@@ -717,108 +831,45 @@ async def create_student(
         )
 
     async def handler(conn: AsyncConnection):
-        dup = await fetch_one(
-            conn,
-            "SELECT student_id FROM student_profiles WHERE school_id = :s AND admission_id = :a",
-            s=school_id,
-            a=body.admission_id,
-        )
-        if dup:
-            raise _conflict(
-                "ADMISSION_ID_TAKEN",
-                "A student with this admission id already exists.",
-                student_id=str(dup["student_id"]),
-            )
-        username = (
-            None
-            if body.email
-            else f"{_USERNAME_SAFE.sub('', section['school_code'].lower())}."
-            f"{_USERNAME_SAFE.sub('', body.admission_id.lower())}"
-        )
-        user_id = await _create_user(
-            conn,
-            email=body.email,
-            display_name=body.display_name,
-            date_of_birth=body.date_of_birth,
-            username=username,
-        )
-        profile = await fetch_one(
-            conn,
-            """INSERT INTO student_profiles (school_id, user_id, admission_id, date_of_birth, preferred_language)
-               VALUES (:s, :u, :a, :dob, :lang) RETURNING student_id""",
-            s=school_id,
-            u=user_id,
-            a=body.admission_id,
-            dob=body.date_of_birth,
-            lang=body.preferred_language,
-        )
-        student_id = profile["student_id"]
-        await _grant_role(conn, school_id, user_id, "STUDENT", actor.user_id)
-        await _record_invite(conn, user_id, invited_by=actor.user_id)
-        enrollment = await fetch_one(
-            conn,
-            """INSERT INTO student_enrollments
-                 (school_id, student_id, academic_year_id, grade_id, section_id, enrollment_date, status)
-               VALUES (:s, :st, :y, :g, :sec, :d, 'ACTIVE') RETURNING enrollment_id""",
-            s=school_id,
-            st=student_id,
-            y=section["academic_year_id"],
-            g=section["grade_id"],
-            sec=body.section_id,
-            d=enrollment_date,
-        )
-        data = {
-            "student_id": student_id,
-            "user_id": user_id,
-            "enrollment_id": enrollment["enrollment_id"],
-            "school_id": school_id,
-            "section_id": body.section_id,
-            "academic_year_id": section["academic_year_id"],
-            "display_name": body.display_name,
-            "admission_id": body.admission_id,
-            "username": username,
-            "guardian_status": "PRIMARY_GUARDIAN_PENDING",  # never blocks learning (doc 21 v1.0)
-        }
-        await audit.record(
-            conn,
-            ctx,
-            action="STUDENT_ENROLLED",
-            entity_type="student_profile",
-            entity_id=student_id,
-            school_id=school_id,
-            actor_user_id=actor.user_id,
-            actor_role="SCHOOL_ADMIN",
-            after={k: v for k, v in data.items() if k != "username"},
-        )
-        enrolled_event = await emit(
-            conn,
-            ctx,
-            event_type="StudentCreated",
-            aggregate_type="student",
-            aggregate_id=student_id,
-            school_id=school_id,
-            data=data,
-        )
-        # Contract §5/§9/§11: every path that yields an ACTIVE enrollment emits this, so the
-        # late-enrollment back-fill (§11) fires uniformly.
-        await emit(
-            conn,
-            ctx,
-            event_type="StudentEnrollmentActivated",
-            aggregate_type="student_enrollment",
-            aggregate_id=enrollment["enrollment_id"],
-            school_id=school_id,
-            causation_id=enrolled_event,
-            data={
-                "student_id": student_id,
-                "section_id": body.section_id,
-                "academic_year_id": section["academic_year_id"],
-                "effective_at": enrollment_date,
-            },
-        )
-        return 201, data
+        return 201, await enroll_student(conn, ctx, actor, section, body)
 
     return await run_idempotent(request, actor, body, handler, op_class=OpClass.DEFAULT, school_id=school_id)
+
+
+# ------------------------------------------------------------------------------------------------
+# POST /v1/students/{id}/reset-login — new temporary password for a username (no-email) student
+# ------------------------------------------------------------------------------------------------
+@router.post("/students/{student_id}/reset-login")
+async def reset_student_login(
+    student_id: UUID,
+    request: Request,
+    actor: Actor = Depends(current_actor),
+    ctx: RequestContext = Depends(get_context),
+) -> JSONResponse:
+    async with get_db().connect() as conn:
+        st = await fetch_one(
+            conn,
+            """SELECT sp.school_id, sp.user_id, u.email FROM student_profiles sp JOIN users u USING (user_id)
+                WHERE sp.student_id = :s""",
+            s=student_id,
+        )
+    if st is None:
+        raise errors.not_found("student", student_id=str(student_id))
+    _require_admin(actor, request, st["school_id"])
+    if st["email"]:
+        raise errors.AppError(
+            "LOGIN_HAS_EMAIL", 409, "This student signs in with email; they can use 'Forgot password'."
+        )
+
+    async def handler(conn: AsyncConnection):
+        password = await get_identity_provider().reset_temporary_password(st["user_id"])
+        await audit.record(
+            conn, ctx, action="STUDENT_LOGIN_RESET", entity_type="student_profile", entity_id=student_id,
+            school_id=st["school_id"], actor_user_id=actor.user_id, actor_role="SCHOOL_ADMIN",
+        )  # fmt: skip
+        return 200, {"student_id": student_id, "temporary_password": password}
+
+    return await run_idempotent(request, actor, {"reset": str(student_id)}, handler, school_id=st["school_id"])
 
 
 # ------------------------------------------------------------------------------------------------
@@ -851,7 +902,7 @@ async def link_guardian(
     _require_admin(actor, request, school_id)
 
     async def handler(conn: AsyncConnection):
-        user_id = await _create_user(conn, email=body.email, display_name=body.display_name, phone=body.phone)
+        user_id = (await _create_user(conn, email=body.email, display_name=body.display_name, phone=body.phone)).user_id
         guardian = await fetch_one(conn, "SELECT guardian_id FROM guardian_profiles WHERE user_id = :u", u=user_id)
         if guardian is None:
             guardian = await fetch_one(

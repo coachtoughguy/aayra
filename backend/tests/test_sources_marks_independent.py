@@ -206,7 +206,7 @@ async def test_long_media_is_split_into_offset_pieces(monkeypatch):
 
 
 async def test_without_ffmpeg_only_api_ready_files_are_sent(monkeypatch):
-    monkeypatch.setattr(transcription.shutil, "which", lambda _: None)
+    monkeypatch.setattr(transcription, "ffmpeg_path", lambda: None)
     pieces, _ = await prepare_audio(b"ID3small", "audio/mpeg", max_seconds=60)
     assert [p.file_name for p in pieces] == ["media.mp3"]
     for data, mime, code in ((b"x" * (26 * 1024 * 1024), "audio/mpeg", "MEDIA_TOO_LARGE"),
@@ -217,7 +217,7 @@ async def test_without_ffmpeg_only_api_ready_files_are_sent(monkeypatch):
 
 
 async def test_openai_text_models_and_errors(openai_settings, monkeypatch):
-    monkeypatch.setattr(transcription.shutil, "which", lambda _: None)
+    monkeypatch.setattr(transcription, "ffmpeg_path", lambda: None)
     openai_settings.transcription_model = "gpt-4o-transcribe"
     t = OpenAITranscriber(transport=httpx.MockTransport(lambda r: httpx.Response(
         200, json={"text": "Light reactions split water.", "usage": {"input_tokens": 50, "output_tokens": 9}})))  # fmt: skip

@@ -8,3 +8,6 @@ __pycache__/
 !.env.example
 node_modules/
 .DS_Store
+
+# demo logins written by seed_live (contain temporary passwords)
+demo_logins.csv
