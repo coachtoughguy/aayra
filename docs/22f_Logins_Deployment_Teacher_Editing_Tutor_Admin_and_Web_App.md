@@ -84,8 +84,8 @@ Hosting is Vercel (API and web app) plus Supabase. Deployment steps are in `DEPL
 
 | Migration | Status |
 |---|---|
-| 024 `storage_bucket` | **Pending** at the time of writing. Supabase rejected the connection with a temporary authentication error; retry. |
-| 025 `tutor_conversations` | **Pending** for the same reason. |
+| 024 `storage_bucket` | Applied 2026-11-01 (version `20261101050501`). The private `lesson-content` bucket exists. |
+| 025 `tutor_conversations` | Applied 2026-11-01 (version `20261101050502`). |
 
 ## 8. Still open / next
 

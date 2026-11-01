@@ -33,7 +33,7 @@ Plan for about 30–45 minutes the first time.
 6. **Email sign-ups.** Under Authentication → Providers → Email, keep **Email** enabled. "Confirm email" is recommended.
    - Supabase's built-in email service is rate-limited, which is fine for testing.
    - For real use, set up your own SMTP under Authentication → Emails.
-7. **Storage bucket and tutor tables.** These are migrations 024 and 025 in this repo, applied to Supabase by Claude. To check, go to Storage. There should be a **private** bucket called `lesson-content`.
+7. **Storage bucket and tutor tables.** These are migrations 024 and 025 in this repo; both are already applied (2026-11-01). To check, go to Storage. There should be a **private** bucket called `lesson-content`.
 
 ## 2. Deploy the API (`aayra-api`)
 

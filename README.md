@@ -49,7 +49,7 @@ AI-powered Learning OS. Product and technical design live in the claude.ai **aay
   - [x] Student progress, notifications inbox, lesson-grounded AI tutor (voice via the browser)
   - [x] Admin: bulk import, transfer, withdraw, year rollover, admin home; late-joiner back-fill
   - [x] Web app for all five roles
-  - [ ] Apply migrations 024 (storage bucket) and 025 (tutor tables) to Supabase
+  - [x] Migrations 024 (storage bucket) and 025 (tutor tables) applied to Supabase (2026-11-01)
 
 ## Demo data
 

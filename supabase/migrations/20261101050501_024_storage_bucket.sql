@@ -1,5 +1,5 @@
 -- 024_storage_bucket
--- PENDING: not yet applied to Supabase.
+-- Applied to Supabase project aayra on 2026-11-01 (version 20261101050501).
 --
 -- The private Storage bucket the API uses for lesson material, transcripts and submissions
 -- (AAYRA_STORAGE_BUCKET, default "lesson-content"). Private: files are only reachable through

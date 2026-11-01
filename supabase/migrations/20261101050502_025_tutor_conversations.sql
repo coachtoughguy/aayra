@@ -1,5 +1,5 @@
 -- 025_tutor_conversations
--- PENDING: not yet applied to Supabase.
+-- Applied to Supabase project aayra on 2026-11-01 (version 20261101050502).
 --
 -- In-lesson AI tutor (docs 10/11 MVP: explain simply, examples/analogies, lesson-grounded doubts,
 -- hints and small practice). Conversations are PRIVATE to the student: contract §4 keeps private
