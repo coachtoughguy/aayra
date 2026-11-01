@@ -1,6 +1,7 @@
 """FastAPI application factory."""
 
 import logging
+import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -76,6 +77,10 @@ def create_app() -> FastAPI:
     app.include_router(progress.router)
     app.include_router(tutor.router)
     app.include_router(views.router)
+    if get_settings().environment == "local" and not os.environ.get("VERCEL"):
+        from app.routers import dev
+
+        app.include_router(dev.router)
     return app
 
 

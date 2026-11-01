@@ -177,3 +177,84 @@ async def child_subjects(student_id: UUID, request: Request, actor: Actor = Depe
             g=child["grade_id"],
         )
     return _ok(request, {"subjects": subjects})
+
+
+@router.get("/student-assignments/{student_assignment_id}/lesson")
+async def student_lesson(student_assignment_id: UUID, request: Request, actor: Actor = Depends(current_actor)) -> dict:
+    """Everything the lesson screen needs: the material (files via short-lived links, links/YouTube,
+    and the readable text Aayra extracted), where the student is, and what's next for this work."""
+    from app.ai.sources import youtube_video_id
+    from app.routers.learning import load_student_assignment
+    from app.storage import get_storage
+
+    sctx = await student_ctx(actor, request)
+    async with get_db().connect() as conn:
+        sa = await load_student_assignment(conn, sctx.student_id, student_assignment_id)
+        info = await fetch_one(
+            conn,
+            """SELECT a.title, a.instructions, a.source_type, a.completion_mode, a.due_at, a.max_marks, a.marks_visibility,
+                      a.review_mode, l.lesson_id, l.title AS lesson_title, l.instructions AS lesson_instructions,
+                      sub.name AS subject_name
+                 FROM assignments a JOIN lessons l USING (lesson_id) JOIN subjects sub ON sub.subject_id = l.subject_id
+                WHERE a.assignment_id = :a""",
+            a=sa["assignment_id"],
+        )
+        progress = await fetch_one(
+            conn,
+            """SELECT status, total_active_seconds, finished_learning_at FROM student_lesson_progress
+                WHERE student_assignment_id = :sa""",
+            sa=student_assignment_id,
+        )
+        focus = await fetch_one(
+            conn,
+            """SELECT focus_cycle_id, started_at FROM focus_cycles WHERE student_assignment_id = :sa AND ended_at IS NULL
+                ORDER BY started_at DESC LIMIT 1""",
+            sa=student_assignment_id,
+        )
+        attempts = await fetch_all(
+            conn,
+            """SELECT attempt_id, status, started_at, completed_at FROM assessment_attempts
+                WHERE student_assignment_id = :sa AND review_session_id IS NULL ORDER BY started_at DESC""",
+            sa=student_assignment_id,
+        )
+        items = await fetch_all(
+            conn,
+            """SELECT ci.content_item_id, ci.content_type, ci.title, ci.source_url, ci.object_key, ci.mime_type,
+                      ci.duration_seconds
+                 FROM lesson_content lc JOIN content_items ci USING (content_item_id)
+                WHERE lc.lesson_id = :l ORDER BY lc.display_order""",
+            l=info["lesson_id"],
+        )
+        for it in items:
+            it["sections"] = await fetch_all(
+                conn,
+                """SELECT chunk_type, content_text AS text, page_number, start_seconds FROM content_evidence_chunks
+                    WHERE content_item_id = :c ORDER BY page_number NULLS LAST, start_seconds NULLS LAST, created_at""",
+                c=it["content_item_id"],
+            )
+            key = it.pop("object_key")
+            it["youtube_id"] = youtube_video_id(it["source_url"]) if it["content_type"] == "YOUTUBE" else None
+            it["download_url"] = (
+                await get_storage().signed_download_url(key, 3600) if key and it["content_type"] != "YOUTUBE" else None
+            )
+        feedback = await fetch_one(
+            conn,
+            "SELECT count(*) AS n FROM teacher_feedback WHERE assignment_id = :a AND student_id = :s AND visible_to_student",
+            a=sa["assignment_id"],
+            s=sctx.student_id,
+        )
+    active = next((a for a in attempts if a["status"] in ("IN_PROGRESS", "AWAITING_EVALUATION")), None)
+    done = next((a for a in attempts if a["status"] == "COMPLETED"), None)
+    return _ok(request, {
+        "student_assignment_id": student_assignment_id, "assignment_id": sa["assignment_id"], "lesson_id": info["lesson_id"],
+        "title": info["title"], "instructions": info["instructions"] or info["lesson_instructions"],
+        "subject_name": info["subject_name"], "source": info["source_type"], "status": sa["status"],
+        "version": sa["version"], "due_at": info["due_at"], "completion_mode": info["completion_mode"],
+        "marks": {"out_of": float(info["max_marks"]), "visibility": info["marks_visibility"]} if info["max_marks"] else None,
+        "learning": {"status": progress["status"] if progress else "NOT_STARTED",
+                     "minutes": round((progress["total_active_seconds"] if progress else 0) / 60),
+                     "active_focus_cycle": focus},
+        "check": {"active_attempt_id": active and active["attempt_id"], "active_status": active and active["status"],
+                  "completed_attempt_id": done and done["attempt_id"]},
+        "materials": items, "feedback_count": feedback["n"],
+    })  # fmt: skip

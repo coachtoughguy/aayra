@@ -217,3 +217,19 @@ async def my_feedback(student_assignment_id: UUID, request: Request, actor: Acto
             st=sctx.student_id,
         )  # never ai_draft_text: students only see what the teacher approved
     return {"data": {"feedback": rows}, "meta": {"request_id": request.state.request_id}}
+
+
+@router.get("/teacher-feedback")
+async def list_feedback(student_assignment_id: UUID, request: Request, actor: Actor = Depends(current_actor)) -> dict:
+    """The teacher's view of feedback for one student's assignment: drafts (incl. the AI draft) and published."""
+    async with get_db().connect() as conn:
+        sa, teacher_id = await _teacher_for(conn, actor, student_assignment_id)
+        rows = await fetch_all(
+            conn,
+            """SELECT * FROM teacher_feedback WHERE assignment_id = :a AND student_id = :st
+                ORDER BY created_at""",
+            a=sa["assignment_id"],
+            st=sa["student_id"],
+        )
+    return {"data": {"feedback": [_view(r) | {"mine": r["teacher_id"] == teacher_id} for r in rows]},
+            "meta": {"request_id": request.state.request_id}}  # fmt: skip
