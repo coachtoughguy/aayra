@@ -228,7 +228,18 @@ export default function StudentLesson() {
   );
 }
 
-export async function startOrResumeCheck(sa: string): Promise<{ attemptId: string; next: any; result?: any }> {
+const starting = new Map<string, Promise<{ attemptId: string; next: any }>>();
+
+/** Start the check, or resume the one already open. Concurrent calls share one request. */
+export function startOrResumeCheck(sa: string): Promise<{ attemptId: string; next: any }> {
+  if (!starting.has(sa)) {
+    const p = startOnce(sa).finally(() => window.setTimeout(() => starting.delete(sa), 1000));
+    starting.set(sa, p);
+  }
+  return starting.get(sa)!;
+}
+
+async function startOnce(sa: string, retried = false): Promise<{ attemptId: string; next: any }> {
   const l = await get<any>(`/v1/student-assignments/${sa}/lesson`);
   const existing = l.check.active_attempt_id || l.check.completed_attempt_id;
   if (existing) {
@@ -237,6 +248,11 @@ export async function startOrResumeCheck(sa: string): Promise<{ attemptId: strin
     if (v.current_question) return { attemptId: existing, next: { type: v.current_question.mode === "RETRY" ? "RETRY" : "QUESTION", question: v.current_question } };
     return { attemptId: existing, next: { type: "AWAITING_EVALUATION" } };
   }
-  const a = await post<any>("/v1/assessment-attempts", { lesson_id: l.lesson_id, student_assignment_id: sa });
-  return { attemptId: a.attempt_id, next: a.next };
+  try {
+    const a = await post<any>("/v1/assessment-attempts", { lesson_id: l.lesson_id, student_assignment_id: sa });
+    return { attemptId: a.attempt_id, next: a.next };
+  } catch (e) {
+    if (!retried && e instanceof ApiError && e.status === 409 && e.code.startsWith("ASSESSMENT_ALREADY")) return startOnce(sa, true);
+    throw e;
+  }
 }

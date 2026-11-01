@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
-import { get } from "../lib/api";
+import { get, kickWorker } from "../lib/api";
 import { useAuth } from "../lib/auth";
 
 const HOME_PATH: Record<string, string> = {
@@ -54,6 +54,8 @@ export default function Layout() {
   const [menu, setMenu] = useState(false);
   const area = loc.pathname.split("/")[1] || "";
   const links = NAV[area] || [];
+
+  useEffect(() => kickWorker(), []); // run anything queued while nobody was online
 
   useEffect(() => {
     let alive = true;

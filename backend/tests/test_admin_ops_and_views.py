@@ -224,3 +224,35 @@ async def test_role_home_views(client, db, storage, school):
     assert [s["name"] for s in subjects] == ["Biology", "Mathematics"]
     mine = ok(await call(client, "GET", "/v1/self-assignments", arjun(school)))["assignments"]
     assert [m["title"] for m in mine] == ["My own thing"] and mine[0]["state"] == "READY_TO_ASSIGN"
+
+
+async def test_student_lesson_screen_and_teacher_feedback_list(client, db, storage, school):
+    view = await ready_lesson(client, db, storage, school)
+    await publish(client, view, school, completion_mode="BOTH", max_marks=10, marks_visibility="STUDENT_VISIBLE")
+    await worker.drain(db)
+    home = ok(await call(client, "GET", "/v1/students/me/home", arjun(school)))
+    sa = home["whats_next"][0]["student_assignment_id"]
+    lesson = ok(await call(client, "GET", f"/v1/student-assignments/{sa}/lesson", arjun(school)))
+    assert lesson["completion_mode"] == "BOTH" and lesson["marks"] == {"out_of": 10.0, "visibility": "STUDENT_VISIBLE"}
+    assert lesson["learning"]["status"] == "NOT_STARTED" and lesson["check"]["active_attempt_id"] is None
+    [m] = lesson["materials"]
+    assert m["download_url"].startswith("stub://") and len(m["sections"]) == 3 and "object_key" not in m
+    other = school["students"][1]["user_id"]
+    err(await call(client, "GET", f"/v1/student-assignments/{sa}/lesson", other), 404, "ASSIGNMENT_NOT_AVAILABLE")
+    ok(
+        await call(
+            client, "POST", "/v1/teacher-feedback", sarah(school), {"student_assignment_id": sa, "ai_draft": True}
+        ),
+        201,
+    )
+    fb = ok(await call(client, "GET", f"/v1/teacher-feedback?student_assignment_id={sa}", sarah(school)))["feedback"]
+    assert len(fb) == 1 and fb[0]["mine"] and fb[0]["status"] == "DRAFT" and fb[0]["ai_draft_text"]
+    r = await call(
+        client, "GET", f"/v1/teacher-feedback?student_assignment_id={sa}", school["teachers"]["ravi"]["user_id"]
+    )
+    assert r.status_code in (403, 404)
+
+
+async def test_dev_routes_only_in_local(client):
+    users = ok(await client.get("/dev/users"))  # tests run with AAYRA_ENVIRONMENT=local
+    assert "users" in users

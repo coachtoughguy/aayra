@@ -31,6 +31,7 @@ function newKey(): string {
 export interface CallOptions {
   idempotencyKey?: string;
   auth?: boolean;
+  skipKick?: boolean;
 }
 
 export async function api<T = any>(method: string, path: string, body?: unknown, opts: CallOptions = {}): Promise<T> {
@@ -63,6 +64,7 @@ export async function api<T = any>(method: string, path: string, body?: unknown,
     if (res.status === 401) onUnauthorized(err.code);
     throw err;
   }
+  if (method !== "GET" && opts.auth !== false && !opts.skipKick) kickWorker();
   return (json?.data ?? json) as T;
 }
 
@@ -72,13 +74,31 @@ export const patch = <T = any>(path: string, body?: unknown) => api<T>("PATCH", 
 export const put = <T = any>(path: string, body?: unknown) => api<T>("PUT", path, body ?? {});
 export const del = <T = any>(path: string) => api<T>("DELETE", path);
 
-// Background jobs run when something kicks them (serverless host). Throttled; failures are ignored.
-let lastKick = 0;
+// Background jobs (file processing, lesson preparation, delivering work, grading) run when something
+// kicks them, because a serverless host has no always-on worker. Every successful change kicks; kicks
+// that arrive while one is running are merged into one follow-up run, so no queued job is missed.
+let kickRunning = false;
+let kickAgain = false;
 export function kickWorker(): void {
-  const now = Date.now();
-  if (now - lastKick < 4000) return;
-  lastKick = now;
-  post("/v1/worker/kick").catch(() => {});
+  if (kickRunning) {
+    kickAgain = true;
+    return;
+  }
+  kickRunning = true;
+  api<{ ran: number; waiting: number }>("POST", "/v1/worker/kick", {}, { skipKick: true })
+    .then((r) => {
+      if (r && r.waiting > 0) kickAgain = true;
+      // Screens listen for this and refresh, so work delivered in the background shows up.
+      if (r && r.ran > 0) window.dispatchEvent(new Event("aayra:jobs-ran"));
+    })
+    .catch(() => {})
+    .finally(() => {
+      kickRunning = false;
+      if (kickAgain) {
+        kickAgain = false;
+        window.setTimeout(kickWorker, 300);
+      }
+    });
 }
 
 export function errorMessage(e: unknown): string {

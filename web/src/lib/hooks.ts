@@ -25,8 +25,11 @@ export function useApi<T = any>(path: string | null, deps: unknown[] = []) {
   useEffect(() => {
     alive.current = true;
     load();
+    const onJobs = () => load();
+    window.addEventListener("aayra:jobs-ran", onJobs);
     return () => {
       alive.current = false;
+      window.removeEventListener("aayra:jobs-ran", onJobs);
     };
   }, [load]);
   return { data, error, loading, reload: load, setData };

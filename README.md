@@ -10,6 +10,8 @@ AI-powered Learning OS. Product and technical design live in the claude.ai **aay
 | `supabase/migrations/` | Exact SQL of every migration live in Supabase project `aayra` (source of truth for the schema) |
 | `supabase/local/` | Tiny Supabase-compat shim (roles, `auth.uid()`) so plain Postgres can replay the migrations for tests |
 | `backend/` | FastAPI service (Python 3.12, SQLAlchemy Core + asyncpg) |
+| `web/` | Web app (React + Vite + TypeScript) for students, teachers, parents, school admins and independent learners |
+| `DEPLOY.md` | Step-by-step deployment: Vercel (API + web) + Supabase |
 | `scripts/` | Dev helpers |
 
 ## Build order (doc 21, Oct 4 addendum)
@@ -40,6 +42,14 @@ AI-powered Learning OS. Product and technical design live in the claude.ai **aay
   - [x] Parents/students can change files until the work is assigned
   - [x] Independent 18+ self-learners (private personal space)
   - [x] Migration 023 applied to Supabase (2026-10-26)
+- [x] **Usable product** — see `docs/22f_*` and `DEPLOY.md`
+  - [x] Real logins (Supabase Auth: invites, username logins with one-time passwords, 18+ self sign-up)
+  - [x] Vercel deployment (serverless API + background jobs on demand + GitHub Actions tick)
+  - [x] Teacher reviews and edits AI-generated topics/questions before publishing
+  - [x] Student progress, notifications inbox, lesson-grounded AI tutor (voice via the browser)
+  - [x] Admin: bulk import, transfer, withdraw, year rollover, admin home; late-joiner back-fill
+  - [x] Web app for all five roles
+  - [ ] Apply migrations 024 (storage bucket) and 025 (tutor tables) to Supabase
 
 ## Demo data
 
